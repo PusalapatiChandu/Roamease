@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_constants.dart';
 import '../../providers/auth_provider.dart';
+import '../../widgets/app_logo.dart';
 import '../../widgets/custom_button.dart';
 import '../../widgets/custom_text_field.dart';
 import '../navigation/main_navigation_shell.dart';
@@ -26,11 +27,6 @@ class _LoginScreenState extends State<LoginScreen> {
     _emailController.dispose();
     _passwordController.dispose();
     super.dispose();
-  }
-
-  void _fillDemoCredentials() {
-    _emailController.text = 'subscriber.alex@roamease.io';
-    _passwordController.text = 'Password@123';
   }
 
   Future<void> _handleLogin() async {
@@ -74,26 +70,11 @@ class _LoginScreenState extends State<LoginScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Brand Header
-                  Center(
-                    child: Container(
-                      padding: const EdgeInsets.all(18),
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: AppColors.card5GGradient,
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppColors.primaryBlue.withOpacity(0.3),
-                            blurRadius: 18,
-                            offset: const Offset(0, 6),
-                          ),
-                        ],
-                      ),
-                      child: const Icon(
-                        Icons.cell_tower_rounded,
-                        size: 38,
-                        color: Colors.white,
-                      ),
+                  // Brand App Logo Header
+                  const Center(
+                    child: AppLogo(
+                      size: 80,
+                      showShadow: true,
                     ),
                   ),
                   const SizedBox(height: 20),
@@ -203,18 +184,6 @@ class _LoginScreenState extends State<LoginScreen> {
                     onPressed: _handleLogin,
                     isLoading: authProvider.isLoading,
                     icon: Icons.login_rounded,
-                  ),
-                  const SizedBox(height: 16),
-
-                  // Quick Demo Credentials Shortcut
-                  OutlinedButton.icon(
-                    onPressed: _fillDemoCredentials,
-                    icon: const Icon(Icons.flash_on_rounded, size: 18),
-                    label: const Text('Fill Demo Subscriber Credentials'),
-                    style: OutlinedButton.styleFrom(
-                      minimumSize: const Size.fromHeight(48),
-                      foregroundColor: isDark ? AppColors.lightBlue : AppColors.primaryBlue,
-                    ),
                   ),
                   const SizedBox(height: 28),
 

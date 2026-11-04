@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_constants.dart';
+import '../../widgets/app_logo.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/network_provider.dart';
 import '../../providers/location_provider.dart';
@@ -96,27 +97,12 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // Animated 5G Pulse Icon
+                // Animated Brand App Logo
                 ScaleTransition(
                   scale: _pulseAnimation,
-                  child: Container(
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: AppColors.card5GGradient,
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppColors.cyan5G.withOpacity(0.4),
-                          blurRadius: 30,
-                          spreadRadius: 4,
-                        ),
-                      ],
-                    ),
-                    child: const Icon(
-                      Icons.cell_tower_rounded,
-                      size: 54,
-                      color: Colors.white,
-                    ),
+                  child: const AppLogo(
+                    size: 96,
+                    showShadow: true,
                   ),
                 ),
                 const SizedBox(height: 32),

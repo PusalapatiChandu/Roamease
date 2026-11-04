@@ -5,6 +5,7 @@ import '../../core/services/storage_service.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/theme_provider.dart';
 import '../../widgets/custom_button.dart';
+import '../../widgets/app_logo.dart';
 import '../auth/login_screen.dart';
 import 'edit_profile_screen.dart';
 
@@ -336,6 +337,34 @@ class _ProfileScreenState extends State<ProfileScreen> {
               style: OutlinedButton.styleFrom(
                 minimumSize: const Size.fromHeight(48),
                 side: BorderSide(color: AppColors.signalPoor.withOpacity(0.5)),
+              ),
+            ),
+
+            const SizedBox(height: 28),
+
+            // App Brand Footer
+            Center(
+              child: Column(
+                children: [
+                  const AppLogo(size: 42, showShadow: false),
+                  const SizedBox(height: 8),
+                  Text(
+                    'RoamEase v1.0.0',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 12,
+                      color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Smart Mobile Roaming & Location System',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: isDark ? AppColors.textMutedDark : AppColors.textMutedLight,
+                    ),
+                  ),
+                ],
               ),
             ),
 

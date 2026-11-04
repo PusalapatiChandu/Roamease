@@ -7,6 +7,7 @@ import '../../providers/auth_provider.dart';
 import '../../providers/network_provider.dart';
 import '../../providers/location_provider.dart';
 import '../../providers/notification_provider.dart';
+import '../../widgets/app_logo.dart';
 import '../../widgets/metric_card.dart';
 import '../../widgets/signal_gauge.dart';
 import '../../widgets/status_badge.dart';
@@ -38,14 +39,7 @@ class HomeDashboardScreen extends StatelessWidget {
       appBar: AppBar(
         title: Row(
           children: [
-            Container(
-              padding: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
-                gradient: AppColors.card5GGradient,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Icon(Icons.cell_tower_rounded, size: 20, color: Colors.white),
-            ),
+            const AppLogo(size: 32, showShadow: false),
             const SizedBox(width: 10),
             const Text(
               AppConstants.appName,

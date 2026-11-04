@@ -5,6 +5,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/constants/app_constants.dart';
 import '../../providers/auth_provider.dart';
+import '../../widgets/app_logo.dart';
 import '../../widgets/custom_button.dart';
 import '../../widgets/custom_text_field.dart';
 import '../navigation/main_navigation_shell.dart';
@@ -146,6 +147,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                const Center(
+                  child: AppLogo(size: 64, showShadow: true),
+                ),
+                const SizedBox(height: 16),
                 Text(
                   'Create Subscriber Profile',
                   style: TextStyle(
