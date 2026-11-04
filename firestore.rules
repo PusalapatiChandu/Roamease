@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // 1. Subscribers Collection
+    // Each subscriber can only read, update or delete their own profile record.
+    match /subscribers/{subscriberId} {
+      allow read, update, delete: if isOwner(subscriberId);
+      allow create: if isAuthenticated() && request.auth.uid == subscriberId;
+    }
+
+    // 2. Permitted Location History Collection
+    // Subscribers can only query and write their own location records.
+    match /location_history/{historyId} {
+      allow read, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    // 3. Network Performance & Speed Test History Collection
+    // Subscribers can only access their own network history records.
+    match /network_history/{networkId} {
+      allow read, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+
+    // 4. User Settings Collection
+    // Subscribers can only read and manage their own app settings.
+    match /user_settings/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // 5. Notifications Collection
+    // Subscribers can only query, update, and delete their own notification alerts.
+    match /notifications/{notificationId} {
+      allow read, delete, update: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid;
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "project_info": {
+    "project_number": "417854473602",
+    "firebase_url": "https://roamease-1e820-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "roamease-1e820",
+    "storage_bucket": "roamease-1e820.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:417854473602:android:78a4b61037f35ae1857b9b",
+        "android_client_info": {
+          "package_name": "com.example.roamease"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "417854473602-icaqfpl4btimv5s6va7nr5qcg56cn26e.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB1mVDBPXJUtA11IlCiPo36wKYkwFXJpEU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "417854473602-icaqfpl4btimv5s6va7nr5qcg56cn26e.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
