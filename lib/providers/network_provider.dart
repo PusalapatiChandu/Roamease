@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../models/network_info_model.dart';
@@ -22,15 +23,16 @@ class NetworkProvider extends ChangeNotifier {
 
   NetworkInfoModel _currentNetwork = NetworkInfoModel.initial();
   List<CellTowerModel> _cellTowers = [];
-  List<MappedBaseStationModel> _mappedBaseStations = [];
+  List<MappedBaseStationModel> _allFetchedBaseStations = [];
   List<String> _towerSourcesUsed = [];
   List<String> _towerUnavailableNotes = [];
   DateTime? _lastTowerScanTime;
   double? _lastTowerScanLat;
   double? _lastTowerScanLng;
+  double _lastScannedRadiusMeters = 5000.0;
   double? _lastSignalMoveLat;
   double? _lastSignalMoveLng;
-  double _towerSearchRadiusMeters = 4500.0;
+  double _towerSearchRadiusMeters = 5000.0;
   String _openCellIdApiKey = '';
   bool _hasValidGoogleMapsKey = false;
 
@@ -47,7 +49,9 @@ class NetworkProvider extends ChangeNotifier {
 
   NetworkInfoModel get currentNetwork => _currentNetwork;
   List<CellTowerModel> get cellTowers => _cellTowers;
-  List<MappedBaseStationModel> get mappedBaseStations => _mappedBaseStations;
+  List<MappedBaseStationModel> get mappedBaseStations => _allFetchedBaseStations
+      .where((s) => s.isServingCell || s.distanceMeters <= _towerSearchRadiusMeters)
+      .toList();
   List<String> get towerSourcesUsed => _towerSourcesUsed;
   List<String> get towerUnavailableNotes => _towerUnavailableNotes;
   DateTime? get lastTowerScanTime => _lastTowerScanTime;
@@ -73,14 +77,14 @@ class NetworkProvider extends ChangeNotifier {
       _cellTowers.where((c) => !c.isRegistered).toList();
 
   MappedBaseStationModel? get servingMappedStation {
-    for (final s in _mappedBaseStations) {
+    for (final s in mappedBaseStations) {
       if (s.isServingCell) return s;
     }
     return null;
   }
 
   MappedBaseStationModel? get nearestMappedStation =>
-      _mappedBaseStations.isNotEmpty ? _mappedBaseStations.first : null;
+      mappedBaseStations.isNotEmpty ? mappedBaseStations.first : null;
 
   NetworkProvider() {
     _init();
@@ -128,7 +132,9 @@ class NetworkProvider extends ChangeNotifier {
   Future<void> setTowerSearchRadius(double meters) async {
     _towerSearchRadiusMeters = meters.clamp(1500.0, 10000.0);
     notifyListeners();
-    if (_lastTowerScanLat != null && _lastTowerScanLng != null) {
+    if (_lastTowerScanLat != null &&
+        _lastTowerScanLng != null &&
+        (_allFetchedBaseStations.isEmpty || _towerSearchRadiusMeters > _lastScannedRadiusMeters)) {
       await scanNearbyBaseStations(_lastTowerScanLat!, _lastTowerScanLng!, force: true);
     }
   }
@@ -177,8 +183,8 @@ class NetworkProvider extends ChangeNotifier {
       }
 
       // Sync serving cell RF measurements onto already-mapped stations
-      if (_mappedBaseStations.isNotEmpty) {
-        _mappedBaseStations = _mappedBaseStations.map((station) {
+      if (_allFetchedBaseStations.isNotEmpty) {
+        _allFetchedBaseStations = _allFetchedBaseStations.map((station) {
           CellTowerModel? match;
           for (final cell in _cellTowers) {
             if (station.cellId != null && station.cellId == cell.cellId) {
@@ -245,11 +251,11 @@ class NetworkProvider extends ChangeNotifier {
   /// Called by LocationProvider whenever subscriber's GPS position updates during movement.
   Future<void> onSubscriberLocationUpdated(double lat, double lng) async {
     // 1. Immediately recalculate live distances to mapped base stations & mapped detected cells
-    if (_mappedBaseStations.isNotEmpty) {
-      _mappedBaseStations = _baseStationService.recalculateDistances(
+    if (_allFetchedBaseStations.isNotEmpty) {
+      _allFetchedBaseStations = _baseStationService.recalculateDistances(
         subscriberLat: lat,
         subscriberLng: lng,
-        stations: _mappedBaseStations,
+        stations: _allFetchedBaseStations,
       );
     }
 
@@ -309,21 +315,23 @@ class NetworkProvider extends ChangeNotifier {
       // Ensure latest modem cell scan is included
       await refreshNetworkDetails(silent: true);
 
+      final double fetchRadius = math.max(_towerSearchRadiusMeters, 5000.0);
       final result = await _baseStationService.fetchNearbyBaseStations(
         latitude: latitude,
         longitude: longitude,
         detectedCells: _cellTowers,
         openCellIdApiKey: _openCellIdApiKey,
-        searchRadiusMeters: _towerSearchRadiusMeters,
+        searchRadiusMeters: fetchRadius,
       );
 
-      _mappedBaseStations = result.mappedStations;
+      _allFetchedBaseStations = result.mappedStations;
       _cellTowers = result.enrichedDetectedCells;
       _towerSourcesUsed = result.sourcesUsed;
       _towerUnavailableNotes = result.unavailableNotes;
       _lastTowerScanTime = result.fetchedAt;
       _lastTowerScanLat = latitude;
       _lastTowerScanLng = longitude;
+      _lastScannedRadiusMeters = fetchRadius;
     } catch (_) {
       _towerUnavailableNotes = ['Unable to query base station datasets cleanly. Check internet access.'];
     }

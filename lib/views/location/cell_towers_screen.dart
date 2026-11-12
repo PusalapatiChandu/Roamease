@@ -358,6 +358,39 @@ class CellTowersScreen extends StatelessWidget {
                 ),
               ],
             ),
+            Row(
+              children: [
+                Text(
+                  'Radius: ',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                ...[3000.0, 4000.0, 5000.0].map((r) {
+                  final bool isSel = (networkProvider.towerSearchRadiusMeters - r).abs() < 250;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ChoiceChip(
+                      visualDensity: VisualDensity.compact,
+                      label: Text(
+                        '${(r / 1000).round()} km',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: isSel ? Colors.white : (isDark ? Colors.white70 : AppColors.navyDark),
+                        ),
+                      ),
+                      selected: isSel,
+                      selectedColor: AppColors.cyan5G,
+                      onSelected: (_) => networkProvider.setTowerSearchRadius(r),
+                    ),
+                  );
+                }),
+              ],
+            ),
             const SizedBox(height: 8),
 
             if (mappedStations.isEmpty) ...[

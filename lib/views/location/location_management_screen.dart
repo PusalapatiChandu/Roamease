@@ -33,9 +33,24 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
   bool _hasAutoSelectedMapMode = false;
   bool _showTowers = true;
   bool _showCoverage = true;
+  bool _showAllTowersInList = false;
   String _generationFilter = 'All'; // 'All', '5G', '4G', 'Serving'
-  double _currentZoom = 14.8;
+  double _currentZoom = 12.4;
   ll.LatLng? _lastCenteredPoint;
+
+  double _zoomForRadius(double radiusMeters) {
+    if (radiusMeters <= 3100) return 13.1;
+    if (radiusMeters <= 4100) return 12.7;
+    if (radiusMeters <= 5200) return 12.3;
+    return 11.6;
+  }
+
+  void _fitRadiusView(double lat, double lng, double radiusMeters) {
+    setState(() {
+      _currentZoom = _zoomForRadius(radiusMeters);
+    });
+    _recenterMap(lat, lng);
+  }
 
   @override
   void dispose() {
@@ -454,7 +469,56 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
 
             const SizedBox(height: 14),
 
-            // 2. Map Generation Filter Strip + Dataset Configuration
+            // 2. Radius Selector (3–5 km) + Map Generation Filter Strip
+            Row(
+              children: [
+                Text(
+                  'SCAN RADIUS:',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.7,
+                    color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ...[3000.0, 4000.0, 5000.0].map((r) {
+                  final bool isSel = (networkProvider.towerSearchRadiusMeters - r).abs() < 250;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ChoiceChip(
+                      visualDensity: VisualDensity.compact,
+                      label: Text(
+                        '${(r / 1000).round()} km',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: isSel ? Colors.white : (isDark ? Colors.white70 : AppColors.navyDark),
+                        ),
+                      ),
+                      selected: isSel,
+                      selectedColor: AppColors.cyan5G,
+                      onSelected: (_) async {
+                        _fitRadiusView(subscriberPoint.latitude, subscriberPoint.longitude, r);
+                        await networkProvider.setTowerSearchRadius(r);
+                      },
+                    ),
+                  );
+                }),
+                const Spacer(),
+                Text(
+                  '${allMappedStations.length} in ${(networkProvider.towerSearchRadiusMeters / 1000).toStringAsFixed(0)} km',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.primaryBlue,
+                  ),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 6),
+
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Row(
@@ -519,6 +583,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                       _buildGoogleMapView(
                         subscriberPoint: subscriberPoint,
                         positionAccuracy: position?.accuracy ?? 30.0,
+                        searchRadiusMeters: networkProvider.towerSearchRadiusMeters,
                         stations: filteredStations,
                         highlightedTarget: highlightedTarget,
                         subscriberName: subscriber?.fullName ?? 'Subscriber',
@@ -527,6 +592,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                       _buildFlutterMapView(
                         subscriberPoint: subscriberPoint,
                         positionAccuracy: position?.accuracy,
+                        searchRadiusMeters: networkProvider.towerSearchRadiusMeters,
                         stations: filteredStations,
                         highlightedTarget: highlightedTarget,
                         locationHistory: locationProvider.locationHistory,
@@ -656,6 +722,18 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                                 locationProvider.checkAndFetchLocation();
                               }
                             },
+                          ),
+                          const SizedBox(height: 6),
+                          _buildMapFloatingButton(
+                            icon: Icons.zoom_out_map_rounded,
+                            tooltip: 'Fit ${(networkProvider.towerSearchRadiusMeters / 1000).toStringAsFixed(0)} km Tower Radius',
+                            isDark: isDark,
+                            iconColor: AppColors.cyan5G,
+                            onPressed: () => _fitRadiusView(
+                              subscriberPoint.latitude,
+                              subscriberPoint.longitude,
+                              networkProvider.towerSearchRadiusMeters,
+                            ),
                           ),
                           const SizedBox(height: 6),
                           _buildMapFloatingButton(
@@ -954,7 +1032,9 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                 ),
               )
             else ...[
-              ...filteredStations.take(5).map((station) {
+              ...filteredStations
+                  .take(_showAllTowersInList ? filteredStations.length : 10)
+                  .map((station) {
                 final accent = _stationAccent(station);
                 return InkWell(
                   onTap: () {
@@ -1062,6 +1142,23 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                   ),
                 );
               }),
+              if (filteredStations.length > 10)
+                Align(
+                  alignment: Alignment.center,
+                  child: TextButton.icon(
+                    onPressed: () => setState(() => _showAllTowersInList = !_showAllTowersInList),
+                    icon: Icon(
+                      _showAllTowersInList ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                      size: 18,
+                    ),
+                    label: Text(
+                      _showAllTowersInList
+                          ? 'Show Fewer Towers'
+                          : 'Show All ${filteredStations.length} Towers (${(networkProvider.towerSearchRadiusMeters / 1000).toStringAsFixed(0)} km Radius)',
+                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ),
               Padding(
                 padding: const EdgeInsets.only(top: 2, bottom: 4),
                 child: Text(
@@ -1230,6 +1327,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
   Widget _buildFlutterMapView({
     required ll.LatLng subscriberPoint,
     required double? positionAccuracy,
+    required double searchRadiusMeters,
     required List<MappedBaseStationModel> stations,
     required MappedBaseStationModel? highlightedTarget,
     required List locationHistory,
@@ -1260,9 +1358,17 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
           maxZoom: 19,
         ),
 
-        // 1. Estimated Network Coverage Circles + GPS Accuracy Circle
+        // 1. Search Radius Ring (3–5 km) + Estimated Coverage Circles + GPS Accuracy Circle
         fm.CircleLayer(
           circles: [
+            fm.CircleMarker(
+              point: subscriberPoint,
+              radius: searchRadiusMeters,
+              useRadiusInMeter: true,
+              color: AppColors.cyan5G.withOpacity(0.04),
+              borderColor: AppColors.cyan5G.withOpacity(0.65),
+              borderStrokeWidth: 2.0,
+            ),
             if (_showCoverage)
               ...stations.map((s) {
                 final c = _stationAccent(s);
@@ -1398,6 +1504,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
   Widget _buildGoogleMapView({
     required ll.LatLng subscriberPoint,
     required double positionAccuracy,
+    required double searchRadiusMeters,
     required List<MappedBaseStationModel> stations,
     required MappedBaseStationModel? highlightedTarget,
     required String subscriberName,
@@ -1434,6 +1541,14 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
     };
 
     final Set<gmaps.Circle> circles = {
+      gmaps.Circle(
+        circleId: const gmaps.CircleId('search_radius_ring'),
+        center: gmaps.LatLng(subscriberPoint.latitude, subscriberPoint.longitude),
+        radius: searchRadiusMeters,
+        fillColor: AppColors.cyan5G.withOpacity(0.04),
+        strokeColor: AppColors.cyan5G.withOpacity(0.7),
+        strokeWidth: 2,
+      ),
       gmaps.Circle(
         circleId: const gmaps.CircleId('gps_accuracy'),
         center: gmaps.LatLng(subscriberPoint.latitude, subscriberPoint.longitude),

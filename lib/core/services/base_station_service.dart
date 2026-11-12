@@ -24,11 +24,11 @@ class BaseStationFetchResult {
 }
 
 class BaseStationService {
-  static const Duration _httpTimeout = Duration(seconds: 9);
+  static const Duration _httpTimeout = Duration(seconds: 12);
 
-  /// Fetches real mapped 4G/5G base stations around [latitude], [longitude]
-  /// from open/authorized telecom datasets and matches them against live
-  /// [detectedCells] reported by Android Telephony APIs.
+  /// Fetches real mapped 4G/5G base stations within [searchRadiusMeters] (typically 3000m–5000m)
+  /// around [latitude], [longitude] from open/authorized telecom datasets and matches them
+  /// against live [detectedCells] reported by Android Telephony APIs.
   ///
   /// Never fabricates tower locations. Any cell whose coordinates cannot be
   /// resolved in an external database remains marked with unavailable coordinates.
@@ -37,7 +37,7 @@ class BaseStationService {
     required double longitude,
     required List<CellTowerModel> detectedCells,
     String openCellIdApiKey = '',
-    double searchRadiusMeters = 4500,
+    double searchRadiusMeters = 5000.0,
   }) async {
     final List<MappedBaseStationModel> collectedStations = [];
     final List<String> sourcesUsed = [];
@@ -48,65 +48,54 @@ class BaseStationService {
       enrichedByKey[_cellKey(cell)] = cell;
     }
 
-    // 1. Authorized OpenCelliD Area & Cell Query (when API key configured)
-    if (openCellIdApiKey.trim().isNotEmpty) {
-      try {
-        final ocArea = await _queryOpenCellIdInArea(
-          latitude: latitude,
-          longitude: longitude,
-          apiKey: openCellIdApiKey.trim(),
-        );
-        if (ocArea.isNotEmpty) {
-          collectedStations.addAll(ocArea);
-          sourcesUsed.add('OpenCelliD Live API');
-        }
+    // Launch all independent network lookups in parallel for fast multi-kilometer scans
+    final Future<List<MappedBaseStationModel>> openCellFuture =
+        openCellIdApiKey.trim().isNotEmpty
+            ? _queryOpenCellIdWithinRadius(
+                latitude: latitude,
+                longitude: longitude,
+                radiusMeters: searchRadiusMeters,
+                detectedCells: detectedCells,
+                apiKey: openCellIdApiKey.trim(),
+              )
+            : Future.value(<MappedBaseStationModel>[]);
 
-        // Also resolve serving/neighbouring detected cells precisely if not yet matched
-        final cellsToLookup = detectedCells
-            .where((c) => c.mcc != null && c.mnc != null && c.tac != null && c.cellId != 'Unavailable')
-            .take(5)
-            .toList();
+    final Future<List<MappedBaseStationModel>> beaconFuture =
+        _lookupDetectedCellsInBeaconDb(
+      detectedCells: detectedCells,
+      subscriberLat: latitude,
+      subscriberLng: longitude,
+    );
 
-        for (final cell in cellsToLookup) {
-          final alreadyPresent = collectedStations.any((s) => s.cellId == cell.cellId && s.mcc == cell.mcc);
-          if (!alreadyPresent) {
-            final resolved = await _lookupCellInOpenCellId(
-              cell: cell,
-              subscriberLat: latitude,
-              subscriberLng: longitude,
-              apiKey: openCellIdApiKey.trim(),
-            );
-            if (resolved != null) {
-              collectedStations.add(resolved);
-              if (!sourcesUsed.contains('OpenCelliD Live API')) {
-                sourcesUsed.add('OpenCelliD Live API');
-              }
-            }
-          }
-        }
-      } catch (e) {
-        unavailableNotes.add('OpenCelliD lookup encountered an error.');
-      }
-    } else {
-      unavailableNotes.add('OpenCelliD API key not configured (optional free key unlocks regional 4G/5G Cell-ID datasets).');
-    }
+    final Future<List<MappedBaseStationModel>> overpassFuture =
+        _queryOverpassPhysicalTowers(
+      latitude: latitude,
+      longitude: longitude,
+      radiusMeters: searchRadiusMeters,
+    );
 
-    // 2. Parallel lookup: beaconDB (no API key needed for detected cells) & OpenStreetMap Overpass (no key needed)
     final results = await Future.wait([
-      _lookupDetectedCellsInBeaconDb(
-        detectedCells: detectedCells,
-        subscriberLat: latitude,
-        subscriberLng: longitude,
-      ),
-      _queryOverpassPhysicalTowers(
-        latitude: latitude,
-        longitude: longitude,
-        radiusMeters: searchRadiusMeters,
-      ),
+      openCellFuture,
+      beaconFuture,
+      overpassFuture,
     ]);
 
-    final beaconStations = results[0];
-    final osmStations = results[1];
+    final ocStations = results[0];
+    final beaconStations = results[1];
+    final osmStations = results[2];
+
+    if (openCellIdApiKey.trim().isEmpty) {
+      unavailableNotes.add(
+        'OpenCelliD API key not configured (optional free key unlocks regional 4G/5G Cell-ID towers within ${(searchRadiusMeters / 1000).toStringAsFixed(1)} km).',
+      );
+    } else if (ocStations.isNotEmpty) {
+      collectedStations.addAll(ocStations);
+      sourcesUsed.add('OpenCelliD Live API');
+    } else {
+      unavailableNotes.add(
+        'OpenCelliD returned no mapped cells in ${(searchRadiusMeters / 1000).toStringAsFixed(1)} km.',
+      );
+    }
 
     if (beaconStations.isNotEmpty) {
       collectedStations.addAll(beaconStations);
@@ -119,13 +108,14 @@ class BaseStationService {
       collectedStations.addAll(osmStations);
       sourcesUsed.add('OpenStreetMap Telecom Registry');
     } else {
-      unavailableNotes.add('No OSM communication masts mapped within ${(searchRadiusMeters / 1000).toStringAsFixed(1)} km.');
+      unavailableNotes.add(
+        'No OSM communication towers mapped within ${(searchRadiusMeters / 1000).toStringAsFixed(1)} km.',
+      );
     }
 
-    // 3. Deduplicate & Match Live Android Cell Telemetry onto Mapped Stations
+    // Deduplicate, match live Android Cell Telemetry, and strictly respect searchRadiusMeters
     final List<MappedBaseStationModel> finalStations = [];
     for (final station in collectedStations) {
-      // Check if this station matches a detected Android cell
       CellTowerModel? matchedCell;
       for (final cell in detectedCells) {
         if (station.cellId != null &&
@@ -136,7 +126,20 @@ class BaseStationService {
         }
       }
 
-      // Skip near-identical duplicate coordinate pins from same source/cellId
+      final double dist = Geolocator.distanceBetween(
+        latitude,
+        longitude,
+        station.latitude,
+        station.longitude,
+      );
+
+      final bool isServing = matchedCell?.isRegistered ?? station.isServingCell;
+
+      // Filter strictly to selected 3-5 km radius (always retain Serving Cell if resolved slightly beyond border)
+      if (!isServing && dist > searchRadiusMeters) {
+        continue;
+      }
+
       final duplicateIdx = finalStations.indexWhere((existing) {
         if (existing.cellId != null && station.cellId != null && existing.cellId == station.cellId) {
           return true;
@@ -147,19 +150,12 @@ class BaseStationService {
           station.latitude,
           station.longitude,
         );
-        return d < 20.0 && existing.generation == station.generation;
+        return d < 25.0 && existing.generation == station.generation;
       });
-
-      final double dist = Geolocator.distanceBetween(
-        latitude,
-        longitude,
-        station.latitude,
-        station.longitude,
-      );
 
       final enrichedStation = station.copyWith(
         distanceMeters: dist,
-        isServingCell: matchedCell?.isRegistered ?? station.isServingCell,
+        isServingCell: isServing,
         isNeighbourCell: matchedCell != null ? !matchedCell.isRegistered : station.isNeighbourCell,
         measuredDbm: matchedCell?.dbm ?? station.measuredDbm,
         measuredRsrp: matchedCell?.rsrp ?? station.measuredRsrp,
@@ -183,7 +179,6 @@ class BaseStationService {
       if (duplicateIdx == -1) {
         finalStations.add(enrichedStation);
       } else {
-        // Prefer station with more complete Cell ID or Serving status
         final existing = finalStations[duplicateIdx];
         if ((enrichedStation.isServingCell && !existing.isServingCell) ||
             (existing.cellId == null && enrichedStation.cellId != null)) {
@@ -192,7 +187,7 @@ class BaseStationService {
       }
     }
 
-    // Sort: Serving Cell first, then Nearest Distance
+    // Sort: Serving Cell first, then Nearest Distance outward up to 3–5 km
     finalStations.sort((a, b) {
       if (a.isServingCell != b.isServingCell) {
         return a.isServingCell ? -1 : 1;
@@ -209,7 +204,7 @@ class BaseStationService {
     );
   }
 
-  /// Recomputes live Haversine distances for existing mapped stations as the subscriber moves.
+  /// Recomputes live Haversine distances for mapped stations as the subscriber moves.
   List<MappedBaseStationModel> recalculateDistances({
     required double subscriberLat,
     required double subscriberLng,
@@ -236,78 +231,146 @@ class BaseStationService {
 
   String _cellKey(CellTowerModel c) => '${c.type}_${c.mcc}_${c.mnc}_${c.tac}_${c.cellId}_${c.pci}';
 
-  Future<List<MappedBaseStationModel>> _queryOpenCellIdInArea({
+  Future<List<MappedBaseStationModel>> _queryOpenCellIdWithinRadius({
     required double latitude,
     required double longitude,
+    required double radiusMeters,
+    required List<CellTowerModel> detectedCells,
     required String apiKey,
   }) async {
-    // OpenCelliD restricts /cell/getInArea BBOX to <= 4,000,000 sq meters (4 sq km).
-    // +/- 0.008 deg is ~1.78 km N/S by ~1.78 km E/W (~3.16 sq km), safely under 4 sq km.
-    const double deltaLat = 0.008;
+    final List<MappedBaseStationModel> collected = [];
+
+    // OpenCelliD limits each /cell/getInArea query to <= 4 sq km (~1.78 km x 1.78 km).
+    // For a 3–5 km radius, query center + 4 cardinal adjacent tiles (~1.9 km step) in parallel.
+    const double stepLat = 0.017; // ~1.89 km
     final double cosLat = math.cos(latitude * math.pi / 180.0).abs().clamp(0.35, 1.0);
-    final double deltaLon = 0.008 / cosLat;
+    final double stepLon = 0.017 / cosLat;
 
-    final String bbox =
-        '${(latitude - deltaLat).toStringAsFixed(6)},'
-        '${(longitude - deltaLon).toStringAsFixed(6)},'
-        '${(latitude + deltaLat).toStringAsFixed(6)},'
-        '${(longitude + deltaLon).toStringAsFixed(6)}';
+    final List<List<double>> tileCenters = [
+      [latitude, longitude],
+      if (radiusMeters >= 2500) ...[
+        [latitude + stepLat, longitude],
+        [latitude - stepLat, longitude],
+        [latitude, longitude + stepLon],
+        [latitude, longitude - stepLon],
+      ],
+    ];
 
-    final uri = Uri.parse(
-      'https://opencellid.org/cell/getInArea?key=${Uri.encodeQueryComponent(apiKey)}&BBOX=$bbox&format=json&limit=50',
-    );
+    try {
+      final tileFutures = tileCenters.map((center) => _querySingleOpenCellIdTile(
+            tileLat: center[0],
+            tileLon: center[1],
+            subscriberLat: latitude,
+            subscriberLng: longitude,
+            apiKey: apiKey,
+          ));
 
-    final response = await http.get(uri, headers: {'User-Agent': 'RoamEase/1.0'}).timeout(_httpTimeout);
-    if (response.statusCode != 200) return [];
+      final tileResults = await Future.wait(tileFutures);
+      for (final list in tileResults) {
+        collected.addAll(list);
+      }
 
-    final decoded = jsonDecode(response.body);
-    if (decoded is! Map || decoded['cells'] is! List) return [];
+      // Also resolve serving/neighbouring detected cells precisely if not yet matched
+      final cellsToLookup = detectedCells
+          .where((c) => c.mcc != null && c.mnc != null && c.tac != null && c.cellId != 'Unavailable')
+          .take(8)
+          .toList();
 
-    final List<MappedBaseStationModel> list = [];
-    for (final raw in decoded['cells'] as List) {
-      if (raw is! Map) continue;
-      final double? lat = (raw['lat'] as num?)?.toDouble();
-      final double? lon = (raw['lon'] as num?)?.toDouble();
-      if (lat == null || lon == null) continue;
+      final cellFutures = cellsToLookup
+          .where((cell) => !collected.any((s) => s.cellId == cell.cellId && s.mcc == cell.mcc))
+          .map((cell) => _lookupCellInOpenCellId(
+                cell: cell,
+                subscriberLat: latitude,
+                subscriberLng: longitude,
+                apiKey: apiKey,
+              ));
 
-      final String radioRaw = raw['radio']?.toString().toUpperCase() ?? 'LTE';
-      final String gen = _normalizeRadio(radioRaw);
-      final String mcc = raw['mcc']?.toString() ?? '';
-      final String mnc = raw['mnc']?.toString() ?? '';
-      final int? lac = (raw['lac'] as num?)?.toInt();
-      final String cellId = raw['cellid']?.toString() ?? 'N/A';
-      final int range = (raw['range'] as num?)?.toInt() ?? 0;
-
-      final opName = TelecomUtils.resolveOperatorFromMccMnc(mcc, mnc) ??
-          (mcc.isNotEmpty ? 'Carrier $mcc-$mnc' : 'Operator Unspecified');
-
-      final double dist = Geolocator.distanceBetween(latitude, longitude, lat, lon);
-      final double covRadius = range > 50
-          ? range.toDouble()
-          : TelecomUtils.estimateReferenceCoverageRadiusMeters(generation: gen);
-
-      list.add(
-        MappedBaseStationModel(
-          id: 'oc_${mcc}_${mnc}_$cellId',
-          latitude: lat,
-          longitude: lon,
-          operatorName: opName,
-          generation: gen,
-          source: 'OpenCelliD Live API',
-          cellId: cellId,
-          tac: lac,
-          mcc: mcc,
-          mnc: mnc,
-          distanceMeters: dist,
-          estimatedCoverageRadiusMeters: covRadius,
-          coverageDatasetLabel: range > 50
-              ? 'OpenCelliD Reported Range (Estimated)'
-              : '3GPP Macro Reference Footprint (Estimated)',
-        ),
-      );
+      final resolvedCells = await Future.wait(cellFutures);
+      for (final item in resolvedCells) {
+        if (item != null) collected.add(item);
+      }
+    } catch (e) {
+      debugPrint('RoamEase: OpenCelliD multi-tile scan error: $e');
     }
 
-    return list;
+    return collected;
+  }
+
+  Future<List<MappedBaseStationModel>> _querySingleOpenCellIdTile({
+    required double tileLat,
+    required double tileLon,
+    required double subscriberLat,
+    required double subscriberLng,
+    required String apiKey,
+  }) async {
+    try {
+      const double deltaLat = 0.0082; // ~1.82 km height
+      final double cosLat = math.cos(tileLat * math.pi / 180.0).abs().clamp(0.35, 1.0);
+      final double deltaLon = 0.0082 / cosLat;
+
+      final String bbox =
+          '${(tileLat - deltaLat).toStringAsFixed(6)},'
+          '${(tileLon - deltaLon).toStringAsFixed(6)},'
+          '${(tileLat + deltaLat).toStringAsFixed(6)},'
+          '${(tileLon + deltaLon).toStringAsFixed(6)}';
+
+      final uri = Uri.parse(
+        'https://opencellid.org/cell/getInArea?key=${Uri.encodeQueryComponent(apiKey)}&BBOX=$bbox&format=json&limit=50',
+      );
+
+      final response = await http.get(uri, headers: {'User-Agent': 'RoamEase/1.0'}).timeout(_httpTimeout);
+      if (response.statusCode != 200) return [];
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map || decoded['cells'] is! List) return [];
+
+      final List<MappedBaseStationModel> list = [];
+      for (final raw in decoded['cells'] as List) {
+        if (raw is! Map) continue;
+        final double? lat = (raw['lat'] as num?)?.toDouble();
+        final double? lon = (raw['lon'] as num?)?.toDouble();
+        if (lat == null || lon == null) continue;
+
+        final String radioRaw = raw['radio']?.toString().toUpperCase() ?? 'LTE';
+        final String gen = _normalizeRadio(radioRaw);
+        final String mcc = raw['mcc']?.toString() ?? '';
+        final String mnc = raw['mnc']?.toString() ?? '';
+        final int? lac = (raw['lac'] as num?)?.toInt();
+        final String cellId = raw['cellid']?.toString() ?? 'N/A';
+        final int range = (raw['range'] as num?)?.toInt() ?? 0;
+
+        final opName = TelecomUtils.resolveOperatorFromMccMnc(mcc, mnc) ??
+            (mcc.isNotEmpty ? 'Carrier $mcc-$mnc' : 'Operator Unspecified');
+
+        final double dist = Geolocator.distanceBetween(subscriberLat, subscriberLng, lat, lon);
+        final double covRadius = range > 50
+            ? range.toDouble()
+            : TelecomUtils.estimateReferenceCoverageRadiusMeters(generation: gen);
+
+        list.add(
+          MappedBaseStationModel(
+            id: 'oc_${mcc}_${mnc}_$cellId',
+            latitude: lat,
+            longitude: lon,
+            operatorName: opName,
+            generation: gen,
+            source: 'OpenCelliD Live API',
+            cellId: cellId,
+            tac: lac,
+            mcc: mcc,
+            mnc: mnc,
+            distanceMeters: dist,
+            estimatedCoverageRadiusMeters: covRadius,
+            coverageDatasetLabel: range > 50
+                ? 'OpenCelliD Reported Range (Estimated)'
+                : '3GPP Macro Reference Footprint (Estimated)',
+          ),
+        );
+      }
+      return list;
+    } catch (_) {
+      return [];
+    }
   }
 
   Future<MappedBaseStationModel?> _lookupCellInOpenCellId({
@@ -316,54 +379,58 @@ class BaseStationService {
     required double subscriberLng,
     required String apiKey,
   }) async {
-    final radio = _toOpenCellIdRadio(cell.type);
-    final uri = Uri.parse(
-      'https://opencellid.org/cell/get?key=${Uri.encodeQueryComponent(apiKey)}'
-      '&mcc=${cell.mcc}&mnc=${cell.mnc}&lac=${cell.tac}&cellid=${cell.cellId}'
-      '${radio != null ? '&radio=$radio' : ''}&format=json',
-    );
+    try {
+      final radio = _toOpenCellIdRadio(cell.type);
+      final uri = Uri.parse(
+        'https://opencellid.org/cell/get?key=${Uri.encodeQueryComponent(apiKey)}'
+        '&mcc=${cell.mcc}&mnc=${cell.mnc}&lac=${cell.tac}&cellid=${cell.cellId}'
+        '${radio != null ? '&radio=$radio' : ''}&format=json',
+      );
 
-    final response = await http.get(uri, headers: {'User-Agent': 'RoamEase/1.0'}).timeout(_httpTimeout);
-    if (response.statusCode != 200) return null;
+      final response = await http.get(uri, headers: {'User-Agent': 'RoamEase/1.0'}).timeout(_httpTimeout);
+      if (response.statusCode != 200) return null;
 
-    final decoded = jsonDecode(response.body);
-    if (decoded is! Map) return null;
-    final double? lat = (decoded['lat'] as num?)?.toDouble();
-    final double? lon = (decoded['lon'] as num?)?.toDouble();
-    if (lat == null || lon == null) return null;
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map) return null;
+      final double? lat = (decoded['lat'] as num?)?.toDouble();
+      final double? lon = (decoded['lon'] as num?)?.toDouble();
+      if (lat == null || lon == null) return null;
 
-    final int range = (decoded['range'] as num?)?.toInt() ?? 0;
-    final double dist = Geolocator.distanceBetween(subscriberLat, subscriberLng, lat, lon);
-    final double covRadius = range > 50
-        ? range.toDouble()
-        : TelecomUtils.estimateReferenceCoverageRadiusMeters(generation: cell.type, arfcn: cell.arfcn);
+      final int range = (decoded['range'] as num?)?.toInt() ?? 0;
+      final double dist = Geolocator.distanceBetween(subscriberLat, subscriberLng, lat, lon);
+      final double covRadius = range > 50
+          ? range.toDouble()
+          : TelecomUtils.estimateReferenceCoverageRadiusMeters(generation: cell.type, arfcn: cell.arfcn);
 
-    return MappedBaseStationModel(
-      id: 'oc_cell_${cell.mcc}_${cell.mnc}_${cell.cellId}',
-      latitude: lat,
-      longitude: lon,
-      operatorName: cell.resolvedOperatorName,
-      generation: cell.type,
-      source: 'OpenCelliD Live API',
-      cellId: cell.cellId,
-      tac: cell.tac,
-      pci: cell.pci,
-      mcc: cell.mcc,
-      mnc: cell.mnc,
-      arfcn: cell.arfcn,
-      isServingCell: cell.isRegistered,
-      isNeighbourCell: !cell.isRegistered,
-      distanceMeters: dist,
-      measuredDbm: cell.dbm != -1 ? cell.dbm : null,
-      measuredRsrp: cell.rsrp,
-      measuredRsrq: cell.rsrq,
-      measuredSinr: cell.sinr,
-      timingAdvance: cell.timingAdvance,
-      estimatedCoverageRadiusMeters: covRadius,
-      coverageDatasetLabel: range > 50
-          ? 'OpenCelliD Reported Range (Estimated)'
-          : '3GPP Macro Reference Footprint (Estimated)',
-    );
+      return MappedBaseStationModel(
+        id: 'oc_cell_${cell.mcc}_${cell.mnc}_${cell.cellId}',
+        latitude: lat,
+        longitude: lon,
+        operatorName: cell.resolvedOperatorName,
+        generation: cell.type,
+        source: 'OpenCelliD Live API',
+        cellId: cell.cellId,
+        tac: cell.tac,
+        pci: cell.pci,
+        mcc: cell.mcc,
+        mnc: cell.mnc,
+        arfcn: cell.arfcn,
+        isServingCell: cell.isRegistered,
+        isNeighbourCell: !cell.isRegistered,
+        distanceMeters: dist,
+        measuredDbm: cell.dbm != -1 ? cell.dbm : null,
+        measuredRsrp: cell.rsrp,
+        measuredRsrq: cell.rsrq,
+        measuredSinr: cell.sinr,
+        timingAdvance: cell.timingAdvance,
+        estimatedCoverageRadiusMeters: covRadius,
+        coverageDatasetLabel: range > 50
+            ? 'OpenCelliD Reported Range (Estimated)'
+            : '3GPP Macro Reference Footprint (Estimated)',
+      );
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<List<MappedBaseStationModel>> _lookupDetectedCellsInBeaconDb({
@@ -371,7 +438,6 @@ class BaseStationService {
     required double subscriberLat,
     required double subscriberLng,
   }) async {
-    final List<MappedBaseStationModel> resolved = [];
     final candidates = detectedCells
         .where((c) =>
             c.mcc != null &&
@@ -381,12 +447,14 @@ class BaseStationService {
             int.tryParse(c.mcc!) != null &&
             int.tryParse(c.mnc!) != null &&
             int.tryParse(c.cellId) != null)
-        .take(4)
+        .take(10)
         .toList();
 
-    for (final cell in candidates) {
+    if (candidates.isEmpty) return [];
+
+    final futures = candidates.map((cell) async {
       final radioType = _toIchnaeaRadio(cell.type);
-      if (radioType == null) continue;
+      if (radioType == null) return null;
 
       try {
         final payload = jsonEncode({
@@ -422,35 +490,32 @@ class BaseStationService {
             final double? lng = (loc['lng'] as num?)?.toDouble();
             final double accuracy = (decoded['accuracy'] as num?)?.toDouble() ?? 1500.0;
 
-            if (lat != null && lng != null && accuracy <= 10000.0) {
+            if (lat != null && lng != null && accuracy <= 12000.0) {
               final double dist = Geolocator.distanceBetween(subscriberLat, subscriberLng, lat, lng);
-              // Reject corrupted / faraway entries (> 35 km)
               if (dist <= 35000.0) {
-                resolved.add(
-                  MappedBaseStationModel(
-                    id: 'bdb_${cell.mcc}_${cell.mnc}_${cell.cellId}',
-                    latitude: lat,
-                    longitude: lng,
-                    operatorName: cell.resolvedOperatorName,
-                    generation: cell.type,
-                    source: 'beaconDB Cell Dataset',
-                    cellId: cell.cellId,
-                    tac: cell.tac,
-                    pci: cell.pci,
-                    mcc: cell.mcc,
-                    mnc: cell.mnc,
-                    arfcn: cell.arfcn,
-                    isServingCell: cell.isRegistered,
-                    isNeighbourCell: !cell.isRegistered,
-                    distanceMeters: dist,
-                    measuredDbm: cell.dbm != -1 ? cell.dbm : null,
-                    measuredRsrp: cell.rsrp,
-                    measuredRsrq: cell.rsrq,
-                    measuredSinr: cell.sinr,
-                    timingAdvance: cell.timingAdvance,
-                    estimatedCoverageRadiusMeters: accuracy.clamp(250.0, 5000.0),
-                    coverageDatasetLabel: 'beaconDB Estimated Cell Footprint',
-                  ),
+                return MappedBaseStationModel(
+                  id: 'bdb_${cell.mcc}_${cell.mnc}_${cell.cellId}',
+                  latitude: lat,
+                  longitude: lng,
+                  operatorName: cell.resolvedOperatorName,
+                  generation: cell.type,
+                  source: 'beaconDB Cell Dataset',
+                  cellId: cell.cellId,
+                  tac: cell.tac,
+                  pci: cell.pci,
+                  mcc: cell.mcc,
+                  mnc: cell.mnc,
+                  arfcn: cell.arfcn,
+                  isServingCell: cell.isRegistered,
+                  isNeighbourCell: !cell.isRegistered,
+                  distanceMeters: dist,
+                  measuredDbm: cell.dbm != -1 ? cell.dbm : null,
+                  measuredRsrp: cell.rsrp,
+                  measuredRsrq: cell.rsrq,
+                  measuredSinr: cell.sinr,
+                  timingAdvance: cell.timingAdvance,
+                  estimatedCoverageRadiusMeters: accuracy.clamp(250.0, 5000.0),
+                  coverageDatasetLabel: 'beaconDB Estimated Cell Footprint',
                 );
               }
             }
@@ -459,9 +524,11 @@ class BaseStationService {
       } catch (e) {
         debugPrint('RoamEase: beaconDB lookup failed for cell ${cell.cellId}: $e');
       }
-    }
+      return null;
+    });
 
-    return resolved;
+    final resolved = await Future.wait(futures);
+    return resolved.whereType<MappedBaseStationModel>().toList();
   }
 
   Future<List<MappedBaseStationModel>> _queryOverpassPhysicalTowers({
@@ -469,21 +536,26 @@ class BaseStationService {
     required double longitude,
     required double radiusMeters,
   }) async {
-    final r = radiusMeters.round().clamp(1000, 10000);
+    final r = radiusMeters.round().clamp(1500, 10000);
     final latStr = latitude.toStringAsFixed(6);
     final lonStr = longitude.toStringAsFixed(6);
 
-    final query = '[out:json][timeout:10];'
+    // Query nodes, ways, and relations (nwr) with `out center` so both point masts
+    // and compound/rooftop telecom structures within 3–5 km are retrieved.
+    final query = '[out:json][timeout:12];'
         '('
-        'node["man_made"="mast"]["tower:type"="communication"](around:$r,$latStr,$lonStr);'
-        'node["communication:mobile_phone"="yes"](around:$r,$latStr,$lonStr);'
-        'node["telecom"="base_station"](around:$r,$latStr,$lonStr);'
+        'nwr["man_made"="mast"]["tower:type"="communication"](around:$r,$latStr,$lonStr);'
+        'nwr["man_made"="tower"]["tower:type"="communication"](around:$r,$latStr,$lonStr);'
+        'nwr["man_made"="communications_tower"](around:$r,$latStr,$lonStr);'
+        'nwr["communication:mobile_phone"="yes"](around:$r,$latStr,$lonStr);'
+        'nwr["telecom"~"base_station|antenna|mast|tower"](around:$r,$latStr,$lonStr);'
         ');'
-        'out body 40;';
+        'out center 120;';
 
     const endpoints = [
       'https://overpass-api.de/api/interpreter',
       'https://overpass.private.coffee/api/interpreter',
+      'https://lz4.overpass-api.de/api/interpreter',
     ];
 
     for (final endpoint in endpoints) {
@@ -526,8 +598,9 @@ class BaseStationService {
 
     for (final el in elements) {
       if (el is! Map) continue;
-      final double? lat = (el['lat'] as num?)?.toDouble();
-      final double? lon = (el['lon'] as num?)?.toDouble();
+      final Map? center = el['center'] is Map ? el['center'] as Map : null;
+      final double? lat = (el['lat'] as num?)?.toDouble() ?? (center?['lat'] as num?)?.toDouble();
+      final double? lon = (el['lon'] as num?)?.toDouble() ?? (center?['lon'] as num?)?.toDouble();
       if (lat == null || lon == null) continue;
 
       final Map tags = (el['tags'] is Map) ? el['tags'] as Map : const {};
@@ -605,4 +678,3 @@ class BaseStationService {
     return null;
   }
 }
-
