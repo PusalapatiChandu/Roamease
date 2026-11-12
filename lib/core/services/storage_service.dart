@@ -146,4 +146,10 @@ class StorageService {
   static Future<void> saveNotificationPreferences(NotificationPreferencesModel prefs) async {
     await _prefs?.setString(AppConstants.prefNotificationPreferences, jsonEncode(prefs.toMap()));
   }
+
+  // --- OPENCELLID AUTHORIZED API KEY ---
+  static String get openCellIdApiKey => _prefs?.getString(AppConstants.prefOpenCellIdApiKey) ?? '';
+  static Future<void> setOpenCellIdApiKey(String key) async {
+    await _prefs?.setString(AppConstants.prefOpenCellIdApiKey, key.trim());
+  }
 }

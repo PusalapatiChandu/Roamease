@@ -13,6 +13,13 @@ class LocationRecordModel {
   final String postalCode;
   final DateTime timestamp;
 
+  // Optional measured cellular signal snapshot at this coordinate
+  final int? signalDbm;
+  final int? rsrp;
+  final String? networkType;
+  final String? operatorName;
+  final String? signalQualityTier;
+
   LocationRecordModel({
     required this.id,
     required this.userId,
@@ -27,6 +34,11 @@ class LocationRecordModel {
     required this.country,
     required this.postalCode,
     required this.timestamp,
+    this.signalDbm,
+    this.rsrp,
+    this.networkType,
+    this.operatorName,
+    this.signalQualityTier,
   });
 
   Map<String, dynamic> toMap() {
@@ -44,6 +56,11 @@ class LocationRecordModel {
       'country': country,
       'postalCode': postalCode,
       'timestamp': timestamp.toIso8601String(),
+      if (signalDbm != null) 'signalDbm': signalDbm,
+      if (rsrp != null) 'rsrp': rsrp,
+      if (networkType != null) 'networkType': networkType,
+      if (operatorName != null) 'operatorName': operatorName,
+      if (signalQualityTier != null) 'signalQualityTier': signalQualityTier,
     };
   }
 
@@ -64,6 +81,11 @@ class LocationRecordModel {
       timestamp: map['timestamp'] != null
           ? DateTime.tryParse(map['timestamp']) ?? DateTime.now()
           : DateTime.now(),
+      signalDbm: (map['signalDbm'] as num?)?.toInt(),
+      rsrp: (map['rsrp'] as num?)?.toInt(),
+      networkType: map['networkType']?.toString(),
+      operatorName: map['operatorName']?.toString(),
+      signalQualityTier: map['signalQualityTier']?.toString(),
     );
   }
 }

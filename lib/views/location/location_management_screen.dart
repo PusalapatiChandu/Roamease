@@ -1,13 +1,22 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_map/flutter_map.dart' as fm;
+import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
 import 'package:latlong2/latlong.dart' as ll;
 import '../../core/constants/app_colors.dart';
 import '../../core/utils/formatters.dart';
+import '../../models/mapped_base_station_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/location_provider.dart';
+import '../../providers/network_provider.dart';
+import '../../widgets/base_station_details_sheet.dart';
+import '../../widgets/opencellid_config_dialog.dart';
 import 'location_history_screen.dart';
 import 'cell_towers_screen.dart';
+
+enum _MapViewMode { street, satellite, googleMaps }
 
 class LocationManagementScreen extends StatefulWidget {
   const LocationManagementScreen({super.key});
@@ -17,10 +26,22 @@ class LocationManagementScreen extends StatefulWidget {
 }
 
 class _LocationManagementScreenState extends State<LocationManagementScreen> {
-  final MapController _mapController = MapController();
-  bool _isSatellite = false;
-  double _currentZoom = 15.5;
+  final fm.MapController _mapController = fm.MapController();
+  gmaps.GoogleMapController? _googleMapController;
+
+  _MapViewMode _mapViewMode = _MapViewMode.street;
+  bool _hasAutoSelectedMapMode = false;
+  bool _showTowers = true;
+  bool _showCoverage = true;
+  String _generationFilter = 'All'; // 'All', '5G', '4G', 'Serving'
+  double _currentZoom = 14.8;
   ll.LatLng? _lastCenteredPoint;
+
+  @override
+  void dispose() {
+    _googleMapController?.dispose();
+    super.dispose();
+  }
 
   IconData _getTravelIcon(String statusLabel) {
     switch (statusLabel) {
@@ -37,8 +58,74 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
 
   void _recenterMap(double lat, double lng) {
     final point = ll.LatLng(lat, lng);
-    _mapController.move(point, _currentZoom);
+    if (_mapViewMode == _MapViewMode.googleMaps) {
+      _googleMapController?.animateCamera(
+        gmaps.CameraUpdate.newLatLngZoom(gmaps.LatLng(lat, lng), _currentZoom),
+      );
+    } else {
+      _mapController.move(point, _currentZoom);
+    }
     _lastCenteredPoint = point;
+  }
+
+  void _cycleMapViewMode() {
+    setState(() {
+      switch (_mapViewMode) {
+        case _MapViewMode.street:
+          _mapViewMode = _MapViewMode.satellite;
+          break;
+        case _MapViewMode.satellite:
+          _mapViewMode = _MapViewMode.googleMaps;
+          break;
+        case _MapViewMode.googleMaps:
+          _mapViewMode = _MapViewMode.street;
+          break;
+      }
+    });
+  }
+
+  String _mapModeLabel(_MapViewMode mode) {
+    switch (mode) {
+      case _MapViewMode.street:
+        return 'OpenStreetMap';
+      case _MapViewMode.satellite:
+        return 'Satellite';
+      case _MapViewMode.googleMaps:
+        return 'Google Maps';
+    }
+  }
+
+  List<MappedBaseStationModel> _filterStations(List<MappedBaseStationModel> all) {
+    switch (_generationFilter) {
+      case '5G':
+        return all.where((s) => s.is5g).toList();
+      case '4G':
+        return all.where((s) => s.is4g).toList();
+      case 'Serving':
+        return all.where((s) => s.isServingCell || s.isNeighbourCell).toList();
+      default:
+        return all;
+    }
+  }
+
+  Color _tierColor(String tier) {
+    switch (tier) {
+      case 'Strong':
+        return AppColors.signalExcellent;
+      case 'Moderate':
+        return AppColors.signalFair;
+      case 'Weak':
+        return AppColors.signalPoor;
+      default:
+        return AppColors.textMutedDark;
+    }
+  }
+
+  Color _stationAccent(MappedBaseStationModel s) {
+    if (s.isServingCell) return AppColors.signalExcellent;
+    if (s.is5g) return AppColors.cyan5G;
+    if (s.is4g) return AppColors.primaryBlue;
+    return AppColors.accentIndigo;
   }
 
   @override
@@ -46,6 +133,12 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final locationProvider = Provider.of<LocationProvider>(context);
     final authProvider = Provider.of<AuthProvider>(context);
+    final networkProvider = Provider.of<NetworkProvider>(context);
+
+    if (!_hasAutoSelectedMapMode && networkProvider.hasValidGoogleMapsKey) {
+      _hasAutoSelectedMapMode = true;
+      _mapViewMode = _MapViewMode.googleMaps;
+    }
 
     final position = locationProvider.currentPosition;
     final address = locationProvider.currentAddress;
@@ -53,22 +146,36 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
     final userId = subscriber?.uid ?? 'guest_subscriber';
     final hasConsent = subscriber?.locationConsent ?? true;
     final isTracking = locationProvider.isTrackingActive;
+    final network = networkProvider.currentNetwork;
 
-    // Use actual subscriber coordinates or fallback to default
+    final allMappedStations = networkProvider.mappedBaseStations;
+    final filteredStations = _filterStations(allMappedStations);
+    final highlightedTarget = networkProvider.servingMappedStation ??
+        (filteredStations.isNotEmpty ? filteredStations.first : null);
+
     final ll.LatLng subscriberPoint = position != null
         ? ll.LatLng(position.latitude, position.longitude)
         : const ll.LatLng(13.030349, 80.018116);
 
-    // Automatically center map once when fresh position arrives
+    // Auto-center once when fresh position arrives
     if (position != null) {
       final point = ll.LatLng(position.latitude, position.longitude);
       if (_lastCenteredPoint == null ||
-          (_lastCenteredPoint!.latitude - point.latitude).abs() > 0.00005 ||
-          (_lastCenteredPoint!.longitude - point.longitude).abs() > 0.00005) {
+          (_lastCenteredPoint!.latitude - point.latitude).abs() > 0.00008 ||
+          (_lastCenteredPoint!.longitude - point.longitude).abs() > 0.00008) {
         _lastCenteredPoint = point;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
-            _mapController.move(point, _currentZoom);
+            if (_mapViewMode == _MapViewMode.googleMaps) {
+              _googleMapController?.animateCamera(
+                gmaps.CameraUpdate.newLatLngZoom(
+                  gmaps.LatLng(point.latitude, point.longitude),
+                  _currentZoom,
+                ),
+              );
+            } else {
+              _mapController.move(point, _currentZoom);
+            }
           }
         });
       }
@@ -76,19 +183,27 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Subscriber Location'),
+        title: const Text('Subscriber Location & Towers'),
         actions: [
           IconButton(
-            icon: locationProvider.isLoading
+            icon: (locationProvider.isLoading || networkProvider.isScanningTowers)
                 ? const SizedBox(
                     width: 18,
                     height: 18,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.refresh_rounded),
-            tooltip: 'Refresh GPS Fix',
-            onPressed: () {
-              locationProvider.checkAndFetchLocation();
+            tooltip: 'Refresh GPS & Rescan Base Stations',
+            onPressed: () async {
+              await locationProvider.checkAndFetchLocation();
+              final pos = locationProvider.currentPosition;
+              if (pos != null) {
+                await networkProvider.scanNearbyBaseStations(
+                  pos.latitude,
+                  pos.longitude,
+                  force: true,
+                );
+              }
             },
           ),
           IconButton(
@@ -102,14 +217,14 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.cell_tower_rounded),
-            tooltip: 'Cell Towers',
+            tooltip: 'Detected Cells & Towers List',
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const CellTowersScreen()),
               );
             },
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 6),
         ],
       ),
       body: SingleChildScrollView(
@@ -117,7 +232,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // A. Location Services Disabled Banner (if device GPS is toggled OFF)
+            // A. Location Services Disabled Banner
             if (!locationProvider.isLocationServiceEnabled) ...[
               Container(
                 margin: const EdgeInsets.only(bottom: 14),
@@ -146,7 +261,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      'Turn on Location Services in your Android settings to detect real-time coordinates, calculate travel speed, and monitor roaming.',
+                      'Turn on Location Services in Android settings to detect GPS coordinates, calculate distance to base stations, and measure travel speed.',
                       style: TextStyle(
                         fontSize: 12,
                         color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
@@ -167,7 +282,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                 ),
               ),
             ] else if (!locationProvider.hasPermission) ...[
-              // B. Permission Required Banner (if permission not granted)
+              // B. Permission Required Banner
               Container(
                 margin: const EdgeInsets.only(bottom: 14),
                 padding: const EdgeInsets.all(16),
@@ -195,7 +310,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      'RoamEase requires location permission to lock GPS satellites and log permitted movement waypoints.',
+                      'RoamEase requires location access to lock GPS satellites, identify serving/neighbouring cells, and map nearby 4G/5G towers.',
                       style: TextStyle(
                         fontSize: 12,
                         color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
@@ -283,8 +398,8 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                   const SizedBox(height: 8),
                   Text(
                     isTracking
-                        ? 'Consent-based GPS waypoint recording is active. Updating coordinates and travel speed continuously as you move.'
-                        : 'Tracking is paused. You can start transparent travel tracking to log route history and roaming towers.',
+                        ? 'Consent-based GPS movement & signal telemetry active. Automatically updating coordinates, tower distances, and RF metrics.'
+                        : 'Tracking paused. Tap Start GPS Tracking to log waypoints & measured signal coverage along your route.',
                     style: TextStyle(
                       color: Colors.white.withOpacity(0.85),
                       fontSize: 12,
@@ -317,8 +432,8 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
                                 content: Text(ok
-                                    ? 'Current waypoint saved to history!'
-                                    : 'Unable to lock GPS fix. Please verify device location.'),
+                                    ? 'Current waypoint & RF snapshot saved!'
+                                    : 'Unable to lock GPS fix. Verify device location.'),
                                 backgroundColor: ok ? AppColors.signalExcellent : AppColors.signalPoor,
                               ),
                             );
@@ -337,11 +452,50 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
               ),
             ),
 
-            const SizedBox(height: 16),
+            const SizedBox(height: 14),
 
-            // 2. Interactive Map Container (High-Resolution OpenStreetMap & Satellite Layers)
+            // 2. Map Generation Filter Strip + Dataset Configuration
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  _buildFilterChip('All', 'All (${allMappedStations.length})', isDark),
+                  const SizedBox(width: 6),
+                  _buildFilterChip(
+                    '5G',
+                    '5G (${allMappedStations.where((s) => s.is5g).length})',
+                    isDark,
+                  ),
+                  const SizedBox(width: 6),
+                  _buildFilterChip(
+                    '4G',
+                    '4G (${allMappedStations.where((s) => s.is4g).length})',
+                    isDark,
+                  ),
+                  const SizedBox(width: 6),
+                  _buildFilterChip(
+                    'Serving',
+                    'Active Cells',
+                    isDark,
+                  ),
+                  const SizedBox(width: 8),
+                  ActionChip(
+                    avatar: const Icon(Icons.tune_rounded, size: 15, color: AppColors.primaryBlue),
+                    label: Text(
+                      networkProvider.openCellIdApiKey.isEmpty ? 'Add API Key' : 'OpenCelliD OK',
+                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+                    ),
+                    onPressed: () => showOpenCellIdConfigDialog(context),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 10),
+
+            // 3. Interactive Map Container (OSM / Satellite / Google Maps + Towers + Estimated Coverage)
             Container(
-              height: 310,
+              height: 350,
               width: double.infinity,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(18),
@@ -361,107 +515,135 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                 borderRadius: BorderRadius.circular(18),
                 child: Stack(
                   children: [
-                    // OpenStreetMap & Satellite Tile Rendering Engine
-                    FlutterMap(
-                      mapController: _mapController,
-                      options: MapOptions(
-                        initialCenter: subscriberPoint,
-                        initialZoom: _currentZoom,
-                        minZoom: 3.0,
-                        maxZoom: 18.5,
-                        onPositionChanged: (camera, hasGesture) {
-                          if (hasGesture) {
-                            _currentZoom = camera.zoom;
-                          }
-                        },
+                    if (_mapViewMode == _MapViewMode.googleMaps)
+                      _buildGoogleMapView(
+                        subscriberPoint: subscriberPoint,
+                        positionAccuracy: position?.accuracy ?? 30.0,
+                        stations: filteredStations,
+                        highlightedTarget: highlightedTarget,
+                        subscriberName: subscriber?.fullName ?? 'Subscriber',
+                      )
+                    else
+                      _buildFlutterMapView(
+                        subscriberPoint: subscriberPoint,
+                        positionAccuracy: position?.accuracy,
+                        stations: filteredStations,
+                        highlightedTarget: highlightedTarget,
+                        locationHistory: locationProvider.locationHistory,
+                        subscriberName: subscriber?.fullName ?? 'Subscriber',
+                        cityName: address?.city ?? 'GPS Fix',
                       ),
-                      children: [
-                        TileLayer(
-                          urlTemplate: _isSatellite
-                              ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
-                              : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                          userAgentPackageName: 'com.example.roamease',
-                          maxZoom: 19,
-                        ),
 
-                        // GPS Accuracy Circle
-                        if (position != null)
-                          CircleLayer(
-                            circles: [
-                              CircleMarker(
-                                point: subscriberPoint,
-                                radius: position.accuracy.clamp(15.0, 300.0),
-                                useRadiusInMeter: true,
-                                color: AppColors.primaryBlue.withOpacity(0.18),
-                                borderColor: AppColors.primaryBlue.withOpacity(0.7),
-                                borderStrokeWidth: 2,
-                              ),
-                            ],
-                          ),
-
-                        // Subscriber Pin Marker with Glowing Avatar
-                        MarkerLayer(
-                          markers: [
-                            Marker(
-                              point: subscriberPoint,
-                              width: 64,
-                              height: 64,
-                              alignment: Alignment.center,
-                              child: _buildSubscriberMarker(
-                                subscriber?.fullName ?? 'Subscriber',
-                                address?.city ?? 'GPS Fix',
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-
-                    // Top-Left Coordinates Pill
+                    // Top-Left Coordinates & Tower Distance Pill
                     Positioned(
                       top: 12,
                       left: 12,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                        decoration: BoxDecoration(
-                          color: (isDark ? const Color(0xFF0F172A) : Colors.white).withOpacity(0.92),
-                          borderRadius: BorderRadius.circular(12),
-                          boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.gps_fixed_rounded, size: 13, color: AppColors.cyan5G),
-                            const SizedBox(width: 6),
-                            Text(
-                              position != null
-                                  ? '${position.latitude.toStringAsFixed(5)}, ${position.longitude.toStringAsFixed(5)}'
-                                  : 'Acquiring GPS...',
-                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: (isDark ? const Color(0xFF0F172A) : Colors.white).withOpacity(0.92),
+                              borderRadius: BorderRadius.circular(12),
+                              boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.gps_fixed_rounded, size: 13, color: AppColors.cyan5G),
+                                const SizedBox(width: 6),
+                                Text(
+                                  position != null
+                                      ? '${position.latitude.toStringAsFixed(5)}, ${position.longitude.toStringAsFixed(5)}'
+                                      : 'Acquiring GPS...',
+                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (highlightedTarget != null) ...[
+                            const SizedBox(height: 6),
+                            GestureDetector(
+                              onTap: () => showBaseStationDetailsSheet(context, highlightedTarget),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: (isDark ? const Color(0xFF0F172A) : Colors.white).withOpacity(0.92),
+                                  borderRadius: BorderRadius.circular(12),
+                                  boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.cell_tower_rounded,
+                                      size: 13,
+                                      color: _stationAccent(highlightedTarget),
+                                    ),
+                                    const SizedBox(width: 5),
+                                    Text(
+                                      '${highlightedTarget.isServingCell ? "Serving" : "Nearest"}: ${highlightedTarget.formattedDistance}',
+                                      style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ),
                           ],
-                        ),
+                          if (_mapViewMode == _MapViewMode.googleMaps &&
+                              !networkProvider.hasValidGoogleMapsKey) ...[
+                            const SizedBox(height: 6),
+                            Container(
+                              constraints: const BoxConstraints(maxWidth: 230),
+                              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: AppColors.roamingWarning.withOpacity(0.95),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Text(
+                                'Google Maps requires an API key in AndroidManifest.xml. Tap layer icon for Street/Satellite tiles.',
+                                style: TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.w600),
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                     ),
 
-                    // Map Floating Controls (Satellite toggle, Recenter, Zoom In/Out)
+                    // Map Floating Controls (Layer Switch, Coverage Toggle, Towers Toggle, Recenter, Zoom)
                     Positioned(
                       top: 12,
                       right: 12,
                       child: Column(
                         children: [
-                          // Satellite / Street Toggle
                           _buildMapFloatingButton(
-                            icon: _isSatellite ? Icons.map_rounded : Icons.satellite_alt_rounded,
-                            tooltip: _isSatellite ? 'Switch to Street Map' : 'Switch to Satellite View',
+                            icon: _mapViewMode == _MapViewMode.street
+                                ? Icons.satellite_alt_rounded
+                                : (_mapViewMode == _MapViewMode.satellite
+                                    ? Icons.public_rounded
+                                    : Icons.map_rounded),
+                            tooltip: 'Switch Map Layer (${_mapModeLabel(_mapViewMode)})',
                             isDark: isDark,
-                            onPressed: () {
-                              setState(() => _isSatellite = !_isSatellite);
-                            },
+                            onPressed: _cycleMapViewMode,
                           ),
-                          const SizedBox(height: 8),
-
-                          // Recenter on Subscriber Button
+                          const SizedBox(height: 6),
+                          _buildMapFloatingButton(
+                            icon: Icons.radar_rounded,
+                            tooltip: _showCoverage ? 'Hide Estimated Coverage' : 'Show Estimated Coverage',
+                            isDark: isDark,
+                            iconColor: _showCoverage ? AppColors.cyan5G : null,
+                            onPressed: () => setState(() => _showCoverage = !_showCoverage),
+                          ),
+                          const SizedBox(height: 6),
+                          _buildMapFloatingButton(
+                            icon: Icons.cell_tower_rounded,
+                            tooltip: _showTowers ? 'Hide Tower Pins' : 'Show Tower Pins',
+                            isDark: isDark,
+                            iconColor: _showTowers ? AppColors.signalExcellent : null,
+                            onPressed: () => setState(() => _showTowers = !_showTowers),
+                          ),
+                          const SizedBox(height: 6),
                           _buildMapFloatingButton(
                             icon: Icons.my_location_rounded,
                             tooltip: 'Center on My Location',
@@ -475,9 +657,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                               }
                             },
                           ),
-                          const SizedBox(height: 8),
-
-                          // Zoom In Button
+                          const SizedBox(height: 6),
                           _buildMapFloatingButton(
                             icon: Icons.add_rounded,
                             tooltip: 'Zoom In',
@@ -485,13 +665,11 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                             onPressed: () {
                               setState(() {
                                 _currentZoom = (_currentZoom + 1.0).clamp(3.0, 18.5);
-                                _mapController.move(_mapController.camera.center, _currentZoom);
+                                _recenterMap(subscriberPoint.latitude, subscriberPoint.longitude);
                               });
                             },
                           ),
-                          const SizedBox(height: 8),
-
-                          // Zoom Out Button
+                          const SizedBox(height: 6),
                           _buildMapFloatingButton(
                             icon: Icons.remove_rounded,
                             tooltip: 'Zoom Out',
@@ -499,7 +677,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                             onPressed: () {
                               setState(() {
                                 _currentZoom = (_currentZoom - 1.0).clamp(3.0, 18.5);
-                                _mapController.move(_mapController.camera.center, _currentZoom);
+                                _recenterMap(subscriberPoint.latitude, subscriberPoint.longitude);
                               });
                             },
                           ),
@@ -507,10 +685,10 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                       ),
                     ),
 
-                    // Map Status Tag (Bottom-Left)
+                    // Bottom-Left Accuracy & Engine Tag
                     Positioned(
-                      bottom: 12,
-                      left: 12,
+                      bottom: 10,
+                      left: 10,
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                         decoration: BoxDecoration(
@@ -532,14 +710,33 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
                             const SizedBox(width: 6),
                             Text(
                               position != null
-                                  ? 'Accuracy ±${position.accuracy.toStringAsFixed(1)}m • ${_isSatellite ? "Satellite" : "OpenStreetMap"}'
-                                  : (locationProvider.isLoading ? 'Locking Satellites...' : 'Waiting for GPS Fix'),
-                              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                                  ? '±${position.accuracy.toStringAsFixed(1)}m • ${_mapModeLabel(_mapViewMode)}'
+                                  : (locationProvider.isLoading ? 'Locking GPS...' : 'Waiting GPS'),
+                              style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
                             ),
                           ],
                         ),
                       ),
                     ),
+
+                    // Bottom-Right Coverage Legend Pill
+                    if (_showCoverage)
+                      Positioned(
+                        bottom: 10,
+                        right: 10,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: (isDark ? const Color(0xFF0F172A) : Colors.white).withOpacity(0.92),
+                            borderRadius: BorderRadius.circular(14),
+                            boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 4)],
+                          ),
+                          child: const Text(
+                            'Rings: Est. Coverage',
+                            style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: AppColors.primaryBlue),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -547,7 +744,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
 
             const SizedBox(height: 16),
 
-            // 3. Geographical Coordinates & Real-time Travel Speed
+            // 4. Geographical Coordinates & Real-time Travel Speed
             Text(
               'GEOGRAPHICAL COORDINATES & TRAVEL SPEED',
               style: TextStyle(
@@ -609,9 +806,278 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
               ],
             ),
 
+            const SizedBox(height: 18),
+
+            // 5. Integrated Live Signal Quality & Nearby Base Stations Section
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'LIVE CELLULAR SIGNAL & NEARBY TOWERS',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 1.0,
+                    color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const CellTowersScreen()),
+                    );
+                  },
+                  child: Text(
+                    'All Cells (${networkProvider.cellTowers.length})',
+                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+
+            // Active Measured Signal Strip (Strong / Moderate / Weak + RSRP / RSRQ / SINR)
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: isDark ? AppColors.darkSurfaceCard : Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: _tierColor(network.signalQualityTier).withOpacity(0.45),
+                ),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${network.operatorName} • ${network.networkType}',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: _tierColor(network.signalQualityTier).withOpacity(0.14),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          'SIGNAL: ${network.signalQualityTier.toUpperCase()}',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                            color: _tierColor(network.signalQualityTier),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      _miniTelemetry('Measured', Formatters.formatDbm(network.signalStrengthDbm), isDark),
+                      _miniTelemetry('RSRP', network.rsrp != null ? '${network.rsrp} dBm' : 'Unavailable', isDark),
+                      _miniTelemetry('RSRQ', network.rsrq != null ? '${network.rsrq} dB' : 'Unavailable', isDark),
+                      _miniTelemetry('SINR', network.sinr != null ? '${network.sinr} dB' : 'Unavailable', isDark),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Serving Cell: ${networkProvider.servingCell?.cellId ?? network.servingCellId ?? "Unavailable"} • '
+                    'Neighbours: ${networkProvider.neighbouringCells.length}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 10),
+
+            // Mapped Base Stations List (sorted by live distance)
+            if (networkProvider.isScanningTowers)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 14),
+                child: Center(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                      SizedBox(width: 10),
+                      Text('Querying nearby 4G/5G base station datasets...', style: TextStyle(fontSize: 12)),
+                    ],
+                  ),
+                ),
+              )
+            else if (filteredStations.isEmpty)
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: isDark ? AppColors.darkSurfaceCard : Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: isDark ? AppColors.darkBorder : AppColors.lightBorder),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'No Mapped Towers in Current Filter / Radius',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      networkProvider.towerUnavailableNotes.isNotEmpty
+                          ? networkProvider.towerUnavailableNotes.join(' ')
+                          : 'No verified OpenStreetMap / beaconDB / OpenCelliD towers found within current scan radius.',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: isDark ? AppColors.textMutedDark : AppColors.textMutedLight,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        TextButton.icon(
+                          onPressed: () => showOpenCellIdConfigDialog(context),
+                          icon: const Icon(Icons.key_rounded, size: 15),
+                          label: const Text('Configure OpenCelliD / Radius', style: TextStyle(fontSize: 11)),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              )
+            else ...[
+              ...filteredStations.take(5).map((station) {
+                final accent = _stationAccent(station);
+                return InkWell(
+                  onTap: () {
+                    _recenterMap(station.latitude, station.longitude);
+                    showBaseStationDetailsSheet(context, station);
+                  },
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: isDark ? AppColors.darkSurfaceCard : Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: station.isServingCell
+                            ? AppColors.signalExcellent.withOpacity(0.55)
+                            : (isDark ? AppColors.darkBorder : AppColors.lightBorder),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: accent.withOpacity(0.12),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(
+                            station.is5g ? Icons.flash_on_rounded : Icons.cell_tower_rounded,
+                            color: accent,
+                            size: 20,
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      station.operatorName,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                    decoration: BoxDecoration(
+                                      color: accent.withOpacity(0.14),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Text(
+                                      station.generation,
+                                      style: TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: accent),
+                                    ),
+                                  ),
+                                  if (station.isServingCell) ...[
+                                    const SizedBox(width: 4),
+                                    const Text(
+                                      '• SERVING',
+                                      style: TextStyle(
+                                        fontSize: 9,
+                                        fontWeight: FontWeight.bold,
+                                        color: AppColors.signalExcellent,
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                '${station.source} • Coverage: ${station.estimatedCoverageTier}',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: isDark ? AppColors.textMutedDark : AppColors.textMutedLight,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              station.formattedDistance,
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                                color: accent,
+                              ),
+                            ),
+                            const Text(
+                              'Tap details',
+                              style: TextStyle(fontSize: 9, color: AppColors.primaryBlue),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
+              Padding(
+                padding: const EdgeInsets.only(top: 2, bottom: 4),
+                child: Text(
+                  'Coverage Disclaimer: Tower coverage radii and path-loss estimates are calculated from external dataset bounds (${networkProvider.towerSourcesUsed.join(", ")}) and propagation models — separate from actual measured dBm/RSRP.',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontStyle: FontStyle.italic,
+                    color: isDark ? AppColors.textMutedDark : AppColors.textMutedLight,
+                  ),
+                ),
+              ),
+            ],
+
             const SizedBox(height: 16),
 
-            // 4. Reverse Geocoded Address Card
+            // 6. Reverse Geocoded Address Card
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -667,7 +1133,7 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
 
             const SizedBox(height: 16),
 
-            // 5. Permitted Location History Quick Access
+            // 7. Permitted Location History Quick Access
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -761,11 +1227,328 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
     );
   }
 
+  Widget _buildFlutterMapView({
+    required ll.LatLng subscriberPoint,
+    required double? positionAccuracy,
+    required List<MappedBaseStationModel> stations,
+    required MappedBaseStationModel? highlightedTarget,
+    required List locationHistory,
+    required String subscriberName,
+    required String cityName,
+  }) {
+    final bool isSat = _mapViewMode == _MapViewMode.satellite;
+
+    return fm.FlutterMap(
+      mapController: _mapController,
+      options: fm.MapOptions(
+        initialCenter: subscriberPoint,
+        initialZoom: _currentZoom,
+        minZoom: 3.0,
+        maxZoom: 18.5,
+        onPositionChanged: (camera, hasGesture) {
+          if (hasGesture) {
+            _currentZoom = camera.zoom;
+          }
+        },
+      ),
+      children: [
+        fm.TileLayer(
+          urlTemplate: isSat
+              ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+              : 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+          userAgentPackageName: 'com.example.roamease',
+          maxZoom: 19,
+        ),
+
+        // 1. Estimated Network Coverage Circles + GPS Accuracy Circle
+        fm.CircleLayer(
+          circles: [
+            if (_showCoverage)
+              ...stations.map((s) {
+                final c = _stationAccent(s);
+                return fm.CircleMarker(
+                  point: ll.LatLng(s.latitude, s.longitude),
+                  radius: s.estimatedCoverageRadiusMeters,
+                  useRadiusInMeter: true,
+                  color: c.withOpacity(0.11),
+                  borderColor: c.withOpacity(0.45),
+                  borderStrokeWidth: s.isServingCell ? 2.0 : 1.2,
+                );
+              }),
+            if (positionAccuracy != null)
+              fm.CircleMarker(
+                point: subscriberPoint,
+                radius: positionAccuracy.clamp(15.0, 300.0),
+                useRadiusInMeter: true,
+                color: AppColors.primaryBlue.withOpacity(0.18),
+                borderColor: AppColors.primaryBlue.withOpacity(0.75),
+                borderStrokeWidth: 2,
+              ),
+          ],
+        ),
+
+        // 2. Distance Polyline from Subscriber GPS to Serving / Nearest Base Station
+        if (_showTowers && highlightedTarget != null)
+          fm.PolylineLayer(
+            polylines: [
+              fm.Polyline(
+                points: [
+                  subscriberPoint,
+                  ll.LatLng(highlightedTarget.latitude, highlightedTarget.longitude),
+                ],
+                color: _stationAccent(highlightedTarget).withOpacity(0.85),
+                strokeWidth: 2.5,
+              ),
+            ],
+          ),
+
+        // 3. Subscriber's Own Measured Signal Trail Waypoints
+        if (_showCoverage)
+          fm.MarkerLayer(
+            markers: locationHistory
+                .where((r) => r.signalQualityTier != null)
+                .take(25)
+                .map<fm.Marker>((r) {
+              final dotColor = _tierColor(r.signalQualityTier!);
+              return fm.Marker(
+                point: ll.LatLng(r.latitude, r.longitude),
+                width: 14,
+                height: 14,
+                child: Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: dotColor,
+                    border: Border.all(color: Colors.white, width: 1.5),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+
+        // 4. Nearby Mapped 4G & 5G Base Station Markers
+        if (_showTowers)
+          fm.MarkerLayer(
+            markers: stations.map((station) {
+              final accent = _stationAccent(station);
+              return fm.Marker(
+                point: ll.LatLng(station.latitude, station.longitude),
+                width: 112,
+                height: 58,
+                alignment: Alignment.center,
+                child: GestureDetector(
+                  onTap: () => showBaseStationDetailsSheet(context, station),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: accent,
+                          border: Border.all(color: Colors.white, width: 2),
+                          boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 4)],
+                        ),
+                        child: Icon(
+                          station.is5g ? Icons.flash_on_rounded : Icons.cell_tower_rounded,
+                          color: Colors.white,
+                          size: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0F172A).withOpacity(0.88),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          '${_shortOperator(station.operatorName)} • ${_shortGen(station.generation)}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 8.5,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+
+        // 5. Subscriber Glowing Avatar Pin Marker
+        fm.MarkerLayer(
+          markers: [
+            fm.Marker(
+              point: subscriberPoint,
+              width: 64,
+              height: 64,
+              alignment: Alignment.center,
+              child: _buildSubscriberMarker(subscriberName, cityName),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGoogleMapView({
+    required ll.LatLng subscriberPoint,
+    required double positionAccuracy,
+    required List<MappedBaseStationModel> stations,
+    required MappedBaseStationModel? highlightedTarget,
+    required String subscriberName,
+  }) {
+    final Set<gmaps.Marker> markers = {
+      gmaps.Marker(
+        markerId: const gmaps.MarkerId('subscriber_gps'),
+        position: gmaps.LatLng(subscriberPoint.latitude, subscriberPoint.longitude),
+        icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(gmaps.BitmapDescriptor.hueBlue),
+        infoWindow: gmaps.InfoWindow(
+          title: subscriberName,
+          snippet: 'Current GPS Position',
+        ),
+      ),
+      if (_showTowers)
+        ...stations.map((station) {
+          final double hue = station.isServingCell
+              ? gmaps.BitmapDescriptor.hueGreen
+              : (station.is5g
+                  ? gmaps.BitmapDescriptor.hueCyan
+                  : gmaps.BitmapDescriptor.hueAzure);
+          return gmaps.Marker(
+            markerId: gmaps.MarkerId(station.id),
+            position: gmaps.LatLng(station.latitude, station.longitude),
+            icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(hue),
+            infoWindow: gmaps.InfoWindow(
+              title: '${station.operatorName} (${station.generation})',
+              snippet: '${station.formattedDistance} • Tap for telemetry',
+              onTap: () => showBaseStationDetailsSheet(context, station),
+            ),
+            onTap: () => showBaseStationDetailsSheet(context, station),
+          );
+        }),
+    };
+
+    final Set<gmaps.Circle> circles = {
+      gmaps.Circle(
+        circleId: const gmaps.CircleId('gps_accuracy'),
+        center: gmaps.LatLng(subscriberPoint.latitude, subscriberPoint.longitude),
+        radius: positionAccuracy.clamp(15.0, 300.0),
+        fillColor: AppColors.primaryBlue.withOpacity(0.18),
+        strokeColor: AppColors.primaryBlue,
+        strokeWidth: 2,
+      ),
+      if (_showCoverage)
+        ...stations.map((s) {
+          final c = _stationAccent(s);
+          return gmaps.Circle(
+            circleId: gmaps.CircleId('cov_${s.id}'),
+            center: gmaps.LatLng(s.latitude, s.longitude),
+            radius: s.estimatedCoverageRadiusMeters,
+            fillColor: c.withOpacity(0.12),
+            strokeColor: c.withOpacity(0.5),
+            strokeWidth: 1,
+          );
+        }),
+    };
+
+    final Set<gmaps.Polyline> polylines = {
+      if (_showTowers && highlightedTarget != null)
+        gmaps.Polyline(
+          polylineId: const gmaps.PolylineId('serving_vector'),
+          points: [
+            gmaps.LatLng(subscriberPoint.latitude, subscriberPoint.longitude),
+            gmaps.LatLng(highlightedTarget.latitude, highlightedTarget.longitude),
+          ],
+          color: _stationAccent(highlightedTarget),
+          width: 3,
+          patterns: [gmaps.PatternItem.dash(12), gmaps.PatternItem.gap(8)],
+        ),
+    };
+
+    return gmaps.GoogleMap(
+      initialCameraPosition: gmaps.CameraPosition(
+        target: gmaps.LatLng(subscriberPoint.latitude, subscriberPoint.longitude),
+        zoom: _currentZoom,
+      ),
+      onMapCreated: (controller) => _googleMapController = controller,
+      myLocationEnabled: true,
+      myLocationButtonEnabled: false,
+      zoomControlsEnabled: false,
+      markers: markers,
+      circles: circles,
+      polylines: polylines,
+      gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+        Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+      },
+    );
+  }
+
+  String _shortOperator(String op) {
+    if (op.contains('Jio')) return 'Jio';
+    if (op.contains('Airtel')) return 'Airtel';
+    if (op.contains('Vodafone Idea')) return 'Vi';
+    if (op.contains('Unspecified')) return 'Tower';
+    return op.length > 10 ? '${op.substring(0, 9)}..' : op;
+  }
+
+  String _shortGen(String gen) {
+    if (gen.contains('5G')) return '5G';
+    if (gen.contains('4G')) return '4G';
+    if (gen.contains('3G')) return '3G';
+    if (gen.contains('2G')) return '2G';
+    return 'Mast';
+  }
+
+  Widget _buildFilterChip(String filterKey, String label, bool isDark) {
+    final bool selected = _generationFilter == filterKey;
+    return ChoiceChip(
+      label: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.bold,
+          color: selected ? Colors.white : (isDark ? Colors.white70 : AppColors.navyDark),
+        ),
+      ),
+      selected: selected,
+      selectedColor: AppColors.primaryBlue,
+      onSelected: (_) => setState(() => _generationFilter = filterKey),
+    );
+  }
+
+  Widget _miniTelemetry(String label, String val, bool isDark) {
+    final bool unavail = val == 'Unavailable';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(fontSize: 10, color: isDark ? AppColors.textMutedDark : AppColors.textMutedLight),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          val,
+          style: TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+            color: unavail
+                ? (isDark ? AppColors.textMutedDark : AppColors.textMutedLight)
+                : (isDark ? Colors.white : AppColors.navyDark),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildSubscriberMarker(String name, String city) {
     return Stack(
       alignment: Alignment.center,
       children: [
-        // Outer pulsing radar glow
         Container(
           width: 54,
           height: 54,
@@ -774,7 +1557,6 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
             color: AppColors.cyan5G.withOpacity(0.25),
           ),
         ),
-        // Mid ring
         Container(
           width: 38,
           height: 38,
@@ -784,7 +1566,6 @@ class _LocationManagementScreenState extends State<LocationManagementScreen> {
             border: Border.all(color: Colors.white, width: 2),
           ),
         ),
-        // Core center icon
         Container(
           width: 26,
           height: 26,

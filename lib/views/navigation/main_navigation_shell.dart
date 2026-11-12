@@ -46,7 +46,12 @@ class _MainNavigationShellState extends State<MainNavigationShell> {
 
     authProvider.attachNotificationProvider(notificationProvider);
     networkProvider.attachNotificationProvider(notificationProvider, userId);
-    locationProvider.attachNotificationProvider(notificationProvider, userId, hasConsent);
+    locationProvider.attachNotificationProvider(
+      notificationProvider,
+      userId,
+      hasConsent,
+      networkProvider: networkProvider,
+    );
 
     final screens = [
       HomeDashboardScreen(onNavigateTab: switchTab),

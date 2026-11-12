@@ -8,6 +8,16 @@ class TelephonyService {
   static const MethodChannel _channel = MethodChannel('com.roamease/telephony');
   final Connectivity _connectivity = Connectivity();
 
+  Future<bool> hasValidGoogleMapsKey() async {
+    if (!Platform.isAndroid) return false;
+    try {
+      final bool? result = await _channel.invokeMethod<bool>('hasValidGoogleMapsKey');
+      return result ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<NetworkInfoModel> fetchNetworkDetails() async {
     if (Platform.isAndroid) {
       try {
@@ -27,14 +37,26 @@ class TelephonyService {
             is5gSupported: map['is5gSupported'] == true,
             simState: map['simState']?.toString() ?? 'Ready',
             timestamp: DateTime.now(),
+            rsrp: (map['rsrp'] as num?)?.toInt(),
+            rsrq: (map['rsrq'] as num?)?.toInt(),
+            sinr: (map['sinr'] as num?)?.toInt(),
+            cqi: (map['cqi'] as num?)?.toInt(),
+            timingAdvance: (map['timingAdvance'] as num?)?.toInt(),
+            servingCellId: map['servingCellId']?.toString(),
+            servingTac: (map['servingTac'] as num?)?.toInt(),
+            servingPci: (map['servingPci'] as num?)?.toInt(),
+            mcc: map['mcc']?.toString(),
+            mnc: map['mnc']?.toString(),
+            arfcn: (map['arfcn'] as num?)?.toInt(),
+            bandwidthKhz: (map['bandwidthKhz'] as num?)?.toInt(),
           );
         }
-      } catch (e) {
+      } catch (_) {
         // Fall back to connectivity plus if telephony call fails
       }
     }
 
-    // Fallback using connectivity_plus for multi-platform / non-Android
+    // Fallback using connectivity_plus for non-Android platforms (signal RF explicitly Unavailable: -1 / null)
     final List<ConnectivityResult> results = await _connectivity.checkConnectivity();
     final bool isWifi = results.contains(ConnectivityResult.wifi);
     final bool isMobile = results.contains(ConnectivityResult.mobile);
@@ -44,21 +66,21 @@ class TelephonyService {
     if (isWifi) {
       netType = 'Wi-Fi';
     } else if (isMobile) {
-      netType = '4G/5G Cellular';
+      netType = 'Cellular';
     }
 
     return NetworkInfoModel(
       networkType: netType,
-      operatorName: isWifi ? 'Wi-Fi Network' : (isConnected ? 'Mobile Operator' : 'No Signal'),
-      signalStrengthDbm: isConnected ? -78 : -1,
-      signalLevel: isConnected ? 3 : 0,
-      signalAsu: isConnected ? 18 : 0,
+      operatorName: isWifi ? 'Wi-Fi Network' : (isConnected ? 'Operator Unavailable' : 'No Signal'),
+      signalStrengthDbm: -1,
+      signalLevel: 0,
+      signalAsu: -1,
       isRoaming: false,
       isWifi: isWifi,
       isCellular: isMobile,
       isConnected: isConnected,
-      is5gSupported: true,
-      simState: isConnected ? 'Ready' : 'Unknown',
+      is5gSupported: false,
+      simState: isConnected ? 'Non-Telephony Host' : 'Unavailable',
       timestamp: DateTime.now(),
     );
   }
@@ -69,12 +91,15 @@ class TelephonyService {
     try {
       final dynamic raw = await _channel.invokeMethod('getNearbyCellTowers');
       if (raw is List) {
-        return raw.map((item) {
-          if (item is Map) {
-            return CellTowerModel.fromMap(item);
-          }
-          return null;
-        }).whereType<CellTowerModel>().toList();
+        return raw
+            .map((item) {
+              if (item is Map) {
+                return CellTowerModel.fromMap(item);
+              }
+              return null;
+            })
+            .whereType<CellTowerModel>()
+            .toList();
       }
     } catch (_) {}
 

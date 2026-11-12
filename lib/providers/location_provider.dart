@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:uuid/uuid.dart';
@@ -7,12 +8,14 @@ import '../core/services/location_service.dart';
 import '../core/services/storage_service.dart';
 import '../core/services/firebase_service.dart';
 import '../core/services/notification_service.dart';
+import 'network_provider.dart';
 import 'notification_provider.dart';
 
 class LocationProvider extends ChangeNotifier {
   final LocationService _locationService = LocationService();
 
   NotificationProvider? _notificationProvider;
+  NetworkProvider? _networkProvider;
   String _userId = 'guest';
   bool _userConsent = true;
 
@@ -33,6 +36,7 @@ class LocationProvider extends ChangeNotifier {
 
   List<LocationRecordModel> _locationHistory = [];
   StreamSubscription<Position>? _positionSubscription;
+  StreamSubscription<Position>? _foregroundMoveSubscription;
 
   // Getters
   Position? get currentPosition => _currentPosition;
@@ -47,10 +51,25 @@ class LocationProvider extends ChangeNotifier {
   String get speedStatusLabel => _speedStatusLabel;
   List<LocationRecordModel> get locationHistory => _locationHistory;
 
-  void attachNotificationProvider(NotificationProvider notifProvider, String userId, bool userConsent) {
+  void attachNotificationProvider(
+    NotificationProvider notifProvider,
+    String userId,
+    bool userConsent, {
+    NetworkProvider? networkProvider,
+  }) {
     _notificationProvider = notifProvider;
     _userId = userId;
     _userConsent = userConsent;
+    if (networkProvider != null) {
+      final isFirstAttach = _networkProvider == null;
+      _networkProvider = networkProvider;
+      if (isFirstAttach && _currentPosition != null) {
+        _networkProvider!.onSubscriberLocationUpdated(
+          _currentPosition!.latitude,
+          _currentPosition!.longitude,
+        );
+      }
+    }
   }
 
   LocationProvider() {
@@ -66,6 +85,7 @@ class LocationProvider extends ChangeNotifier {
   @override
   void dispose() {
     _positionSubscription?.cancel();
+    _foregroundMoveSubscription?.cancel();
     super.dispose();
   }
 
@@ -73,12 +93,10 @@ class LocationProvider extends ChangeNotifier {
   void _updateTravelSpeed(Position newPos) {
     final now = DateTime.now();
 
-    // 1. Check if hardware sensor velocity is valid (> 0.2 m/s)
     if (newPos.speed > 0.2) {
       final rawKmh = newPos.speed * 3.6;
       _currentTravelSpeedKmh = double.parse(rawKmh.toStringAsFixed(1));
     } else if (_previousPosition != null && _previousPositionTime != null) {
-      // 2. Compute delta distance over delta time
       final elapsedSec = now.difference(_previousPositionTime!).inMilliseconds / 1000.0;
       if (elapsedSec >= 0.8) {
         final distanceMeters = Geolocator.distanceBetween(
@@ -88,19 +106,15 @@ class LocationProvider extends ChangeNotifier {
           newPos.longitude,
         );
 
-        // If distance exceeds GPS jitter margin (> 1.5 meters)
         if (distanceMeters >= 1.5) {
           final computedMps = distanceMeters / elapsedSec;
           final computedKmh = computedMps * 3.6;
 
-          // Reject erratic GPS teleport spikes (> 220 km/h)
           if (computedKmh < 220.0) {
-            // Smooth with exponential filter
             final smoothed = (0.75 * computedKmh) + (0.25 * _currentTravelSpeedKmh);
             _currentTravelSpeedKmh = double.parse(smoothed.toStringAsFixed(1));
           }
         } else {
-          // Stationary
           _currentTravelSpeedKmh = 0.0;
         }
       }
@@ -108,7 +122,6 @@ class LocationProvider extends ChangeNotifier {
       _currentTravelSpeedKmh = 0.0;
     }
 
-    // Update activity status classification
     if (_currentTravelSpeedKmh < 1.0) {
       _speedStatusLabel = 'Stationary';
     } else if (_currentTravelSpeedKmh < 7.5) {
@@ -123,6 +136,42 @@ class LocationProvider extends ChangeNotifier {
     _previousPositionTime = now;
   }
 
+  /// Ensures real-time location and signal updates run automatically while user moves
+  void _ensureForegroundMovementWatcher() {
+    if (_isTrackingActive || !_hasPermission || !_isLocationServiceEnabled || !_userConsent) {
+      return;
+    }
+    if (_foregroundMoveSubscription != null) return;
+
+    const settings = LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 15,
+    );
+
+    _foregroundMoveSubscription = Geolocator.getPositionStream(
+      locationSettings: settings,
+    ).listen(
+      (pos) async {
+        _currentPosition = pos;
+        _updateTravelSpeed(pos);
+        _networkProvider?.onSubscriberLocationUpdated(pos.latitude, pos.longitude);
+
+        // Update reverse geocoded city if shifted noticeably
+        try {
+          _currentAddress = await _locationService.getAddressFromCoordinates(
+            pos.latitude,
+            pos.longitude,
+          );
+        } catch (_) {}
+
+        notifyListeners();
+      },
+      onError: (e) {
+        debugPrint('RoamEase: Foreground location watcher error: $e');
+      },
+    );
+  }
+
   /// Proactively verifies location services and acquires the current GPS fix
   Future<void> checkAndFetchLocation() async {
     _isLoading = true;
@@ -130,7 +179,6 @@ class LocationProvider extends ChangeNotifier {
     notifyListeners();
 
     try {
-      // 1. Check device location hardware toggle
       final serviceEnabled = await _locationService.isLocationServiceEnabled();
       _isLocationServiceEnabled = serviceEnabled;
       if (!serviceEnabled) {
@@ -140,7 +188,6 @@ class LocationProvider extends ChangeNotifier {
         return;
       }
 
-      // 2. Check and proactively request permission if not yet granted
       LocationPermission perm = await _locationService.checkPermission();
       if (perm == LocationPermission.denied) {
         perm = await _locationService.requestPermission();
@@ -155,7 +202,9 @@ class LocationProvider extends ChangeNotifier {
           _currentPosition = pos;
           _updateTravelSpeed(pos);
 
-          // Reverse geocode asynchronously
+          // Notify NetworkProvider immediately for distance computation & base station discovery
+          _networkProvider?.onSubscriberLocationUpdated(pos.latitude, pos.longitude);
+
           _currentAddress = await _locationService.getAddressFromCoordinates(
             pos.latitude,
             pos.longitude,
@@ -169,6 +218,8 @@ class LocationProvider extends ChangeNotifier {
               userConsent: _userConsent,
             );
           }
+
+          _ensureForegroundMovementWatcher();
         } else {
           _errorMessage = 'Waiting for satellite GPS lock. Step near an open window or outdoors.';
         }
@@ -212,6 +263,8 @@ class LocationProvider extends ChangeNotifier {
         if (pos != null) {
           _currentPosition = pos;
           _updateTravelSpeed(pos);
+          _networkProvider?.onSubscriberLocationUpdated(pos.latitude, pos.longitude);
+
           _currentAddress = await _locationService.getAddressFromCoordinates(
             pos.latitude,
             pos.longitude,
@@ -225,6 +278,7 @@ class LocationProvider extends ChangeNotifier {
               userConsent: _userConsent,
             );
           }
+          _ensureForegroundMovementWatcher();
           _isLoading = false;
           notifyListeners();
           return true;
@@ -260,7 +314,6 @@ class LocationProvider extends ChangeNotifier {
     }
 
     if (_isTrackingActive) {
-      // STOP TRACKING
       await _positionSubscription?.cancel();
       _positionSubscription = null;
       _isTrackingActive = false;
@@ -271,13 +324,17 @@ class LocationProvider extends ChangeNotifier {
         isTracking: false,
         locationSummary: '',
       );
+      _ensureForegroundMovementWatcher();
       notifyListeners();
     } else {
-      // START TRACKING
       if (!_hasPermission || !_isLocationServiceEnabled) {
         final granted = await requestPermissionAndLocate();
         if (!granted) return;
       }
+
+      // Replace coarse foreground watcher with full continuous tracking stream
+      await _foregroundMoveSubscription?.cancel();
+      _foregroundMoveSubscription = null;
 
       _isTrackingActive = true;
       await StorageService.setTrackingActive(true);
@@ -285,6 +342,7 @@ class LocationProvider extends ChangeNotifier {
       _positionSubscription = _locationService.getPositionStream().listen((pos) async {
         _currentPosition = pos;
         _updateTravelSpeed(pos);
+        _networkProvider?.onSubscriberLocationUpdated(pos.latitude, pos.longitude);
 
         final address = await _locationService.getAddressFromCoordinates(
           pos.latitude,
@@ -292,14 +350,13 @@ class LocationProvider extends ChangeNotifier {
         );
         _currentAddress = address;
 
-        // Auto-save waypoint to history
         await _saveWaypoint(
           userId: userId,
           latitude: pos.latitude,
           longitude: pos.longitude,
           altitude: pos.altitude,
           accuracy: pos.accuracy,
-          speed: _currentTravelSpeedKmh / 3.6, // in m/s
+          speed: _currentTravelSpeedKmh / 3.6,
           address: address,
         );
 
@@ -324,6 +381,7 @@ class LocationProvider extends ChangeNotifier {
     required double speed,
     required LocationAddressResult address,
   }) async {
+    final net = _networkProvider?.currentNetwork;
     final record = LocationRecordModel(
       id: const Uuid().v4(),
       userId: userId,
@@ -338,6 +396,11 @@ class LocationProvider extends ChangeNotifier {
       country: address.country,
       postalCode: address.postalCode,
       timestamp: DateTime.now(),
+      signalDbm: (net != null && net.signalStrengthDbm != -1) ? net.signalStrengthDbm : null,
+      rsrp: net?.rsrp,
+      networkType: net?.networkType,
+      operatorName: net?.operatorName,
+      signalQualityTier: net?.signalQualityTier,
     );
 
     _locationHistory.insert(0, record);

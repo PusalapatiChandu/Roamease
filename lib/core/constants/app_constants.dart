@@ -55,4 +55,5 @@ class AppConstants {
   static const String prefLastLongitude = 'roamease_last_longitude';
   static const String prefNotificationPreferences = 'roamease_notification_prefs';
   static const String prefLocalNotificationsCache = 'roamease_notifications_cache';
+  static const String prefOpenCellIdApiKey = 'roamease_opencellid_api_key';
 }

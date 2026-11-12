@@ -254,6 +254,10 @@ class HomeDashboardScreen extends StatelessWidget {
                 asu: network.signalAsu,
                 networkType: network.networkType,
                 qualityLabel: network.qualityLabel,
+                signalQualityTier: network.signalQualityTier,
+                rsrp: network.rsrp,
+                rsrq: network.rsrq,
+                sinr: network.sinr,
               ),
 
               const SizedBox(height: 16),

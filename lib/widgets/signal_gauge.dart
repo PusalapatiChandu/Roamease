@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../core/constants/app_colors.dart';
 import '../core/utils/formatters.dart';
+import '../core/utils/telecom_utils.dart';
 
 class SignalGauge extends StatelessWidget {
   final int signalLevel; // 0 to 4
@@ -8,6 +9,10 @@ class SignalGauge extends StatelessWidget {
   final int asu;
   final String networkType;
   final String qualityLabel;
+  final String? signalQualityTier; // Strong / Moderate / Weak / Unavailable
+  final int? rsrp;
+  final int? rsrq;
+  final int? sinr;
 
   const SignalGauge({
     super.key,
@@ -16,21 +21,45 @@ class SignalGauge extends StatelessWidget {
     required this.asu,
     required this.networkType,
     required this.qualityLabel,
+    this.signalQualityTier,
+    this.rsrp,
+    this.rsrq,
+    this.sinr,
   });
 
+  String get _resolvedTier =>
+      signalQualityTier ??
+      TelecomUtils.classifySignalQuality(
+        rsrp: rsrp,
+        dbm: dbm,
+        level: signalLevel,
+        isConnected: qualityLabel != 'Disconnected',
+      );
+
   Color _getSignalColor() {
-    switch (qualityLabel) {
-      case 'Excellent':
+    switch (_resolvedTier) {
+      case 'Strong':
         return AppColors.signalExcellent;
-      case 'Good':
-        return AppColors.signalGood;
-      case 'Fair':
+      case 'Moderate':
         return AppColors.signalFair;
-      case 'Poor':
-      case 'Disconnected':
+      case 'Weak':
         return AppColors.signalPoor;
+      case 'Unavailable':
+        return AppColors.textMutedDark;
       default:
-        return AppColors.primaryBlue;
+        switch (qualityLabel) {
+          case 'Excellent':
+            return AppColors.signalExcellent;
+          case 'Good':
+            return AppColors.signalGood;
+          case 'Fair':
+            return AppColors.signalFair;
+          case 'Poor':
+          case 'Disconnected':
+            return AppColors.signalPoor;
+          default:
+            return AppColors.primaryBlue;
+        }
     }
   }
 
@@ -38,6 +67,7 @@ class SignalGauge extends StatelessWidget {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final color = _getSignalColor();
+    final tier = _resolvedTier;
 
     return Container(
       padding: const EdgeInsets.all(18),
@@ -80,11 +110,11 @@ class SignalGauge extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    'SIGNAL METRICS',
+                    'MEASURED SIGNAL METRICS',
                     style: TextStyle(
-                      fontSize: 12,
+                      fontSize: 11,
                       fontWeight: FontWeight.bold,
-                      letterSpacing: 1.0,
+                      letterSpacing: 0.9,
                       color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
                     ),
                   ),
@@ -98,12 +128,12 @@ class SignalGauge extends StatelessWidget {
                   border: Border.all(color: color.withOpacity(0.4)),
                 ),
                 child: Text(
-                  qualityLabel.toUpperCase(),
+                  '${tier.toUpperCase()} ($qualityLabel)',
                   style: TextStyle(
                     color: color,
                     fontWeight: FontWeight.bold,
-                    fontSize: 11,
-                    letterSpacing: 0.5,
+                    fontSize: 10,
+                    letterSpacing: 0.4,
                   ),
                 ),
               ),
@@ -176,8 +206,47 @@ class SignalGauge extends StatelessWidget {
               ),
             ],
           ),
+          if (rsrp != null || rsrq != null || sinr != null) ...[
+            const SizedBox(height: 14),
+            Divider(height: 1, color: isDark ? AppColors.darkBorder : AppColors.lightBorder),
+            const SizedBox(height: 10),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _buildMiniRf('RSRP', rsrp != null ? '$rsrp dBm' : 'Unavailable', isDark),
+                _buildMiniRf('RSRQ', rsrq != null ? '$rsrq dB' : 'Unavailable', isDark),
+                _buildMiniRf('SINR', sinr != null ? '$sinr dB' : 'Unavailable', isDark),
+              ],
+            ),
+          ],
         ],
       ),
+    );
+  }
+
+  Widget _buildMiniRf(String label, String val, bool isDark) {
+    final bool unavailable = val == 'Unavailable';
+    return Column(
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 10,
+            color: isDark ? AppColors.textMutedDark : AppColors.textMutedLight,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          val,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            color: unavailable
+                ? (isDark ? AppColors.textMutedDark : AppColors.textMutedLight)
+                : (isDark ? Colors.white : AppColors.navyDark),
+          ),
+        ),
+      ],
     );
   }
 }

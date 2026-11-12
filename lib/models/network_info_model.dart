@@ -1,5 +1,7 @@
+import '../core/utils/telecom_utils.dart';
+
 class NetworkInfoModel {
-  final String networkType; // '5G', '4G LTE', '3G', '2G', 'Wi-Fi', 'No Connection'
+  final String networkType; // '5G NR', '5G NSA', '4G LTE', '3G', '2G', 'Wi-Fi', 'No Connection'
   final String operatorName;
   final int signalStrengthDbm;
   final int signalLevel; // 0 to 4
@@ -11,6 +13,20 @@ class NetworkInfoModel {
   final bool is5gSupported;
   final String simState;
   final DateTime timestamp;
+
+  // Serving Cell RF & Identity Telemetry (nullable when unavailable/unsupported)
+  final int? rsrp;
+  final int? rsrq;
+  final int? sinr;
+  final int? cqi;
+  final int? timingAdvance;
+  final String? servingCellId;
+  final int? servingTac;
+  final int? servingPci;
+  final String? mcc;
+  final String? mnc;
+  final int? arfcn;
+  final int? bandwidthKhz;
 
   NetworkInfoModel({
     required this.networkType,
@@ -25,6 +41,18 @@ class NetworkInfoModel {
     required this.is5gSupported,
     required this.simState,
     required this.timestamp,
+    this.rsrp,
+    this.rsrq,
+    this.sinr,
+    this.cqi,
+    this.timingAdvance,
+    this.servingCellId,
+    this.servingTac,
+    this.servingPci,
+    this.mcc,
+    this.mnc,
+    this.arfcn,
+    this.bandwidthKhz,
   });
 
   String get qualityLabel {
@@ -40,6 +68,17 @@ class NetworkInfoModel {
       return 'Poor';
     }
   }
+
+  /// Authoritative Strong / Moderate / Weak / Unavailable classification based on measured values.
+  String get signalQualityTier => TelecomUtils.classifySignalQuality(
+        rsrp: rsrp,
+        dbm: signalStrengthDbm,
+        level: signalLevel,
+        isConnected: isConnected,
+      );
+
+  /// Resolved frequency band name when ARFCN is reported by modem.
+  String? get bandDescription => TelecomUtils.resolveBandFromArfcn(arfcn, networkType);
 
   bool get isPoorConnection {
     if (!isConnected) return true;
@@ -64,6 +103,18 @@ class NetworkInfoModel {
       'is5gSupported': is5gSupported,
       'simState': simState,
       'timestamp': timestamp.toIso8601String(),
+      if (rsrp != null) 'rsrp': rsrp,
+      if (rsrq != null) 'rsrq': rsrq,
+      if (sinr != null) 'sinr': sinr,
+      if (cqi != null) 'cqi': cqi,
+      if (timingAdvance != null) 'timingAdvance': timingAdvance,
+      if (servingCellId != null) 'servingCellId': servingCellId,
+      if (servingTac != null) 'servingTac': servingTac,
+      if (servingPci != null) 'servingPci': servingPci,
+      if (mcc != null) 'mcc': mcc,
+      if (mnc != null) 'mnc': mnc,
+      if (arfcn != null) 'arfcn': arfcn,
+      if (bandwidthKhz != null) 'bandwidthKhz': bandwidthKhz,
     };
   }
 
@@ -83,6 +134,18 @@ class NetworkInfoModel {
       timestamp: map['timestamp'] != null
           ? DateTime.tryParse(map['timestamp']) ?? DateTime.now()
           : DateTime.now(),
+      rsrp: (map['rsrp'] as num?)?.toInt(),
+      rsrq: (map['rsrq'] as num?)?.toInt(),
+      sinr: (map['sinr'] as num?)?.toInt(),
+      cqi: (map['cqi'] as num?)?.toInt(),
+      timingAdvance: (map['timingAdvance'] as num?)?.toInt(),
+      servingCellId: map['servingCellId']?.toString(),
+      servingTac: (map['servingTac'] as num?)?.toInt(),
+      servingPci: (map['servingPci'] as num?)?.toInt(),
+      mcc: map['mcc']?.toString(),
+      mnc: map['mnc']?.toString(),
+      arfcn: (map['arfcn'] as num?)?.toInt(),
+      bandwidthKhz: (map['bandwidthKhz'] as num?)?.toInt(),
     );
   }
 

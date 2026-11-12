@@ -2,7 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../core/constants/app_colors.dart';
 import '../../core/utils/formatters.dart';
+import '../../core/utils/telecom_utils.dart';
+import '../../providers/location_provider.dart';
 import '../../providers/network_provider.dart';
+import '../../widgets/base_station_details_sheet.dart';
+import '../../widgets/opencellid_config_dialog.dart';
 import '../../widgets/signal_gauge.dart';
 import 'speed_test_screen.dart';
 import 'comparison_screen.dart';
@@ -12,18 +16,41 @@ import '../location/cell_towers_screen.dart';
 class NetworkManagementScreen extends StatelessWidget {
   const NetworkManagementScreen({super.key});
 
+  Color _tierColor(String tier) {
+    switch (tier) {
+      case 'Strong':
+        return AppColors.signalExcellent;
+      case 'Moderate':
+        return AppColors.signalFair;
+      case 'Weak':
+        return AppColors.signalPoor;
+      default:
+        return AppColors.textMutedDark;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final networkProvider = Provider.of<NetworkProvider>(context);
+    final locationProvider = Provider.of<LocationProvider>(context);
 
     final network = networkProvider.currentNetwork;
     final latestSpeed = networkProvider.latestSpeedTest;
+    final servingCell = networkProvider.servingCell;
+    final neighbours = networkProvider.neighbouringCells;
+    final servingOrNearestMapped =
+        networkProvider.servingMappedStation ?? networkProvider.nearestMappedStation;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('5G Network Management'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.tune_rounded),
+            tooltip: 'Base Station Dataset Settings',
+            onPressed: () => showOpenCellIdConfigDialog(context),
+          ),
           IconButton(
             icon: networkProvider.isRefreshing
                 ? const SizedBox(
@@ -32,14 +59,34 @@ class NetworkManagementScreen extends StatelessWidget {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.refresh_rounded),
-            tooltip: 'Rescan Network Telemetry',
-            onPressed: () => networkProvider.refreshNetworkDetails(),
+            tooltip: 'Rescan Network & Base Stations',
+            onPressed: () async {
+              await networkProvider.refreshNetworkDetails();
+              final pos = locationProvider.currentPosition;
+              if (pos != null) {
+                await networkProvider.scanNearbyBaseStations(
+                  pos.latitude,
+                  pos.longitude,
+                  force: true,
+                );
+              }
+            },
           ),
           const SizedBox(width: 8),
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: () => networkProvider.refreshNetworkDetails(),
+        onRefresh: () async {
+          await networkProvider.refreshNetworkDetails();
+          final pos = locationProvider.currentPosition;
+          if (pos != null) {
+            await networkProvider.scanNearbyBaseStations(
+              pos.latitude,
+              pos.longitude,
+              force: true,
+            );
+          }
+        },
         child: SingleChildScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -71,23 +118,28 @@ class NetworkManagementScreen extends StatelessWidget {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Row(
-                          children: [
-                            Icon(
-                              network.is5gActive ? Icons.flash_on_rounded : Icons.cell_tower_rounded,
-                              color: Colors.white,
-                              size: 24,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              network.operatorName,
-                              style: const TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
+                        Expanded(
+                          child: Row(
+                            children: [
+                              Icon(
+                                network.is5gActive ? Icons.flash_on_rounded : Icons.cell_tower_rounded,
                                 color: Colors.white,
+                                size: 24,
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 8),
+                              Flexible(
+                                child: Text(
+                                  network.operatorName,
+                                  style: const TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -113,7 +165,7 @@ class NetworkManagementScreen extends StatelessWidget {
                         _buildTelecomStat('Connection', network.isConnected ? 'Connected' : 'Offline', Colors.white),
                         _buildTelecomStat('Roaming', network.isRoaming ? 'Active' : 'Home', Colors.white),
                         _buildTelecomStat('SIM State', network.simState, Colors.white),
-                        _buildTelecomStat('Quality', network.qualityLabel, Colors.white),
+                        _buildTelecomStat('Signal Tier', network.signalQualityTier, Colors.white),
                       ],
                     ),
                   ],
@@ -141,11 +193,11 @@ class NetworkManagementScreen extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              'Poor Signal Level Detected',
+                              'Weak Signal Level Detected',
                               style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.signalPoor),
                             ),
                             Text(
-                              'Signal strength is below optimal threshold (${network.signalStrengthDbm} dBm). Data rates may experience high packet loss.',
+                              'Measured signal is ${Formatters.formatDbm(network.signalStrengthDbm)}. Data rates may experience high packet loss.',
                               style: TextStyle(
                                 fontSize: 11,
                                 color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
@@ -167,11 +219,187 @@ class NetworkManagementScreen extends StatelessWidget {
                 asu: network.signalAsu,
                 networkType: network.networkType,
                 qualityLabel: network.qualityLabel,
+                signalQualityTier: network.signalQualityTier,
+                rsrp: network.rsrp,
+                rsrq: network.rsrq,
+                sinr: network.sinr,
               ),
 
               const SizedBox(height: 16),
 
-              // 4. Clearly Labelled Speed-Test Tool
+              // 4. Serving Cell & Neighbouring Base Station RF Quality Card
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: isDark ? AppColors.darkSurfaceCard : Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                    color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.sensors_rounded, color: AppColors.cyan5G, size: 20),
+                            const SizedBox(width: 8),
+                            Text(
+                              'SERVING CELL & RF QUALITY',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 0.8,
+                                color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
+                              ),
+                            ),
+                          ],
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: _tierColor(network.signalQualityTier).withOpacity(0.14),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            network.signalQualityTier.toUpperCase(),
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: _tierColor(network.signalQualityTier),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+
+                    // RSRP / RSRQ / SINR Measured Strip
+                    Container(
+                      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isDark ? AppColors.darkBorder : AppColors.lightBorder,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _buildRfTile(
+                            'RSRP',
+                            network.rsrp != null ? '${network.rsrp} dBm' : 'Unavailable',
+                            isDark,
+                          ),
+                          _buildRfTile(
+                            'RSRQ',
+                            network.rsrq != null ? '${network.rsrq} dB' : 'Unavailable',
+                            isDark,
+                          ),
+                          _buildRfTile(
+                            'SINR',
+                            network.sinr != null ? '${network.sinr} dB' : 'Unavailable',
+                            isDark,
+                          ),
+                          _buildRfTile(
+                            'TA',
+                            network.timingAdvance != null ? '${network.timingAdvance}' : 'Unavailable',
+                            isDark,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+
+                    // Serving Cell ID / TAC / PCI / Band
+                    Wrap(
+                      spacing: 10,
+                      runSpacing: 8,
+                      children: [
+                        _buildCompactChip(
+                          'Serving Cell ID: ${servingCell?.cellId ?? network.servingCellId ?? "Unavailable"}',
+                          isDark,
+                        ),
+                        _buildCompactChip(
+                          'PCI: ${servingCell?.pci ?? network.servingPci ?? "Unavailable"}',
+                          isDark,
+                        ),
+                        _buildCompactChip(
+                          'TAC: ${servingCell?.tac ?? network.servingTac ?? "Unavailable"}',
+                          isDark,
+                        ),
+                        if (network.mcc != null && network.mnc != null)
+                          _buildCompactChip('MCC-MNC: ${network.mcc}-${network.mnc}', isDark),
+                        if (network.bandDescription != null)
+                          _buildCompactChip(network.bandDescription!, isDark),
+                      ],
+                    ),
+
+                    const SizedBox(height: 12),
+                    Divider(height: 1, color: isDark ? AppColors.darkBorder : AppColors.lightBorder),
+                    const SizedBox(height: 10),
+
+                    // Neighbouring Cells & Mapped Base Station Distance Summary
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Cells: ${servingCell != null ? "1 Serving" : "0 Serving"}, ${neighbours.length} Neighbours',
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                servingOrNearestMapped != null
+                                    ? '${servingOrNearestMapped.isServingCell ? "Serving Tower" : "Nearest Mapped Tower"}: ${TelecomUtils.formatDistance(servingOrNearestMapped.distanceMeters)} (${servingOrNearestMapped.generation})'
+                                    : (networkProvider.isScanningTowers
+                                        ? 'Scanning mapped base station datasets...'
+                                        : 'Mapped tower distance unavailable for current cell'),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: isDark ? AppColors.textMutedDark : AppColors.textMutedLight,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (servingOrNearestMapped != null)
+                          TextButton(
+                            onPressed: () => showBaseStationDetailsSheet(context, servingOrNearestMapped),
+                            child: const Text('Inspect', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.of(context).push(
+                            MaterialPageRoute(builder: (_) => const CellTowersScreen()),
+                          );
+                        },
+                        icon: const Icon(Icons.cell_tower_rounded, size: 17),
+                        label: Text(
+                          'Inspect Detected Cells (${networkProvider.cellTowers.length}) & Mapped Towers (${networkProvider.mappedBaseStations.length})',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // 5. Clearly Labelled Speed-Test Tool
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
@@ -311,7 +539,7 @@ class NetworkManagementScreen extends StatelessWidget {
 
               const SizedBox(height: 18),
 
-              // 5. Navigation Shortcuts: 4G vs 5G Comparison & Network Analytics
+              // 6. Navigation Shortcuts: 4G vs 5G Comparison & Network Analytics
               Text(
                 'NETWORK TOOLS & BENCHMARKS',
                 style: TextStyle(
@@ -361,8 +589,8 @@ class NetworkManagementScreen extends StatelessWidget {
 
               _buildActionTile(
                 context,
-                title: 'Nearby Mobile Network Towers',
-                subtitle: 'Android CellInfo triangulation & tower metrics',
+                title: 'Base Stations & Serving Cells',
+                subtitle: 'Android CellInfo + OpenCelliD / beaconDB / OSM towers',
                 icon: Icons.cell_tower_rounded,
                 color: AppColors.royalBlue,
                 onTap: () {
@@ -374,7 +602,7 @@ class NetworkManagementScreen extends StatelessWidget {
 
               const SizedBox(height: 20),
 
-              // 6. Recent Speed Test History Log
+              // 7. Recent Speed Test History Log
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -491,6 +719,50 @@ class NetworkManagementScreen extends StatelessWidget {
               const SizedBox(height: 24),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRfTile(String label, String value, bool isDark) {
+    final bool unavailable = value == 'Unavailable';
+    return Column(
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 10,
+            color: isDark ? AppColors.textMutedDark : AppColors.textMutedLight,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            color: unavailable
+                ? (isDark ? AppColors.textMutedDark : AppColors.textMutedLight)
+                : (isDark ? Colors.white : AppColors.navyDark),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCompactChip(String text, bool isDark) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: isDark ? Colors.white10 : const Color(0xFFF1F5F9),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          color: isDark ? AppColors.textSecondaryDark : AppColors.textSecondaryLight,
         ),
       ),
     );
